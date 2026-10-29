@@ -1,0 +1,61 @@
+<?php
+// server_challenge.hphp — HolyPHP entry point for the twelve-dollar-server-challenge.
+//
+// Everything that matters (io_uring loop, SQLite, JWT HS256, JSON rendering)
+// lives in the native engine below, compiled into the program as the runtime
+// builtin holy_challenge_start(). This file is the configuration shell.
+//
+// The four SPEC.md environment variables are honoured:
+//
+//   SQLITE_PATH=/root/challenge/seed/feed.db
+//   JWT_SECRET=twelve-dollar-challenge
+//   HOST=0.0.0.0 PORT=3000 ./holy_challenge_server
+//
+// Engine switches (defaults are the measured configuration):
+//   HPHP_MR=1     multishot recv + provided buffers instead of single-shot
+//   HPHP_DEFER=0  COOP_TASKRUN instead of DEFER_TASKRUN
+
+class ChallengeServer {
+    pub int $port;
+    pub string $dbPath;
+
+    public function __construct(int $port, string $dbPath) {
+        $this->port = $port;
+        $this->dbPath = $dbPath;
+    }
+
+    public function serve(): void {
+        $secret = getenv("JWT_SECRET");
+        $has_secret = ($secret !== false && $secret !== "");
+
+        echo "==========================================================\n";
+        echo " HolyPHP - twelve-dollar-server-challenge API\n";
+        echo "==========================================================\n";
+        echo " Port:       " . $this->port . "\n";
+        echo " Database:   " . $this->dbPath . "\n";
+        echo " JWT secret: " . ($has_secret ? "from JWT_SECRET" : "default") . "\n";
+        echo " Engine:     Linux io_uring (multi-shot accept, batched recv)\n";
+        echo " DB Engine:  SQLite WAL (synchronous=NORMAL, group commit)\n";
+        echo "==========================================================\n";
+
+        $rc = holy_challenge_start($this->port, $this->dbPath);
+        if ($rc !== 0) {
+            echo "engine stopped with code " . $rc . "\n";
+        }
+    }
+}
+
+function env_int(string $key, int $fallback): int {
+    $v = getenv($key);
+    if ($v === false || $v === "") { return $fallback; }
+    return intval($v);
+}
+
+function env_str(string $key, string $fallback): string {
+    $v = getenv($key);
+    if ($v === false || $v === "") { return $fallback; }
+    return $v;
+}
+
+$server = new ChallengeServer(env_int("PORT", 3000), env_str("SQLITE_PATH", "feed.db"));
+$server->serve();
