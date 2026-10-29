@@ -162,6 +162,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | goose-native-tbsvttr | #143 | Goose (native) | **failed** (install OOM) | | | | | | | | 2026-10-28 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install OOM) | | | | | | | | 2026-10-29 |
 | — | rust-hyper-dannie203 | #178 | Rust (hyper) | **failed** (build: no cargo) | | | | | | | | 2026-10-29 |
+| — | v-epoll-i098 (follow-up #191) | #191 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-29 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -273,6 +274,10 @@ committed in this repo.
 - **Rust #178 — build failed** (`6aa144b`): `install.sh` installs Rust with rustup into root's `~/.cargo`, but
   `build.sh` runs as the `deploy` user, which has no `cargo` (exit 127), so the app never built (1/42 tests). CI passed
   because GitHub's runner has Rust preinstalled. Not patched.
+- **V #191 — install failed** (`0ed86bf`, follow-up to merged v-epoll-i098 #113, whose 100,000 row above stays):
+  `install.sh` bootstraps V 0.5.2 from source (`vc/v.c` → `v1` → `v2` → `v`), and on the 1 vCPU box it was still
+  compiling when the install hit its 1-hour timeout (exit 124; no OOM kill this time), so `/opt/v/v` was never installed
+  and the app couldn't build (1/42 tests). Not patched.
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
@@ -306,6 +311,9 @@ committed in this repo.
   stops accepting below a memory floor; its HTTP parser's route order comes from a load-test route profile (rule 7
   question). Its 266,000 hold had **0.60 % errors, all HTTP 503** (58,296); the 280,000 5-minute confirm failed
   (0.99 %: 503s plus timeouts). Scored as submitted (266k); held open for Arjay (rules 1/3/5/7 question).
+- **v-epoll-i098's follow-up #191** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`td_sqlite.c`,
+  like lean-derive #153; amalgamation not patched; SQL fallback). Not scored yet (install timeout, see failures); held
+  open for Arjay (rules 2/3 question). The author offers to drop `td_sqlite.c` if reads must go through SQL.
 - **python-pyrustapi #147 serves its reads from the `pyrustapi` package's native SQL tier** (`sql=` route options),
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
