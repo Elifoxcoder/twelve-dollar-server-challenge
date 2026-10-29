@@ -28,7 +28,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | # | Submission | PR | Language | Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | µs/req | RAM MB | Scored |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
-| 2 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **266,000** | 25,453 | 366 | 699 | 0.60 | 71 | 25 | 1,308 | 2026-10-29 |
+| 2 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **271,000** | 25,959 | 15 | 38 | 0.00 | 70 | 24 | 546 | 2026-10-29 |
 | 3 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 4 | fsharp-kestrel-delneg | #142 | F# (Kestrel, io_uring) | **260,000** | 24,999 | 32 | 322 | 0.00 | 78 | 28 | 761 | 2026-10-28 |
 | 5 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
@@ -313,8 +313,9 @@ committed in this repo.
   and patches SQLite's source at build time (`pcache1` max-key change, like objc-uring #154). Under memory pressure it
   answers fast HTTP 503s against a built-in error budget (~0.6 % + a 20k burst, sized under the 1 % pass line) and
   stops accepting below a memory floor; its HTTP parser's route order comes from a load-test route profile (rule 7
-  question). Its 266,000 hold had **0.60 % errors, all HTTP 503** (58,296); the 280,000 5-minute confirm failed
-  (0.99 %: 503s plus timeouts). Scored as submitted (266k); held open for Arjay (rules 1/3/5/7 question).
+  question). Re-scored at 1ecaac1 (checkpoint thread for `CURSED=max`): its 271,000 hold had 0 errors; the 285,000
+  5-minute hold failed (0.62 %: 503s plus timeouts, p99 15 s). (The earlier 266,000 at 1b4cb97 had 0.60 % errors, all
+  HTTP 503.) Scored as submitted (271k); held open for Arjay (rules 1/3/5/7 question).
 - **v-epoll-i098's follow-up #191** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`td_sqlite.c`,
   like lean-derive #153; amalgamation not patched; SQL fallback). Not scored yet (install timeout, see failures); held
   open for Arjay (rules 2/3 question). The author offers to drop `td_sqlite.c` if reads must go through SQL.
