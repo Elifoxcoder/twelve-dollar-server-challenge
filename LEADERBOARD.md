@@ -150,6 +150,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 | — | goose-native-tbsvttr | #143 | Goose (native) | **failed** (install OOM) | | | | | | | | 2026-10-28 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install OOM) | | | | | | | | 2026-10-29 |
+| — | rust-hyper-dannie203 | #178 | Rust (hyper) | **failed** (build: no cargo) | | | | | | | | 2026-10-29 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -253,6 +254,9 @@ committed in this repo.
 - **V #166 — install failed** (`1bcfd37`): `install.sh` runs `make` on the pinned V checkout (bootstrap from source,
   like #69), and it ran the 1 vCPU / 2 GB box out of memory: mu-c1 stopped answering from 02:11 to 03:06 and the
   install hit its 1-hour timeout (exit 124), so the app never built (1/42 tests). Not patched.
+- **Rust #178 — build failed** (`6aa144b`): `install.sh` installs Rust with rustup into root's `~/.cargo`, but
+  `build.sh` runs as the `deploy` user, which has no `cargo` (exit 127), so the app never built (1/42 tests). CI passed
+  because GitHub's runner has Rust preinstalled. Not patched.
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
