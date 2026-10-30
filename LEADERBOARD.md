@@ -15,7 +15,8 @@ passed a 5-minute hold** with p95 < 500 ms, p99 < 1 s, errors < 1 %. Every probe
 
 **Commits scored.** Each PR's head at the time of its run. zig-iouring-marler8997 #125 was updated afterwards, and
 its merged code is newer than what was scored (`a08923d`). go-epoll-MegaPanchamZ is scored at its follow-up PR #144
-(`e66a931`, not merged yet); its earlier #72 run (`9df7449`) held 165,000.
+(`e66a931`, not merged yet); its earlier #72 run (`9df7449`) held 165,000. c-iouring-meros is scored at its follow-up PR #199 (`097ef9b`, not
+merged yet); its merged #137 code (`b2a5207`) held 235,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -35,8 +36,8 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 6 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
 | 7 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
 | 7 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring) | **240,000** | 23,184 | 202 | 300 | 0.00 | 78 | 31 | 788 | 2026-10-28 |
-| 9 | c-iouring-meros | #137 | C (io_uring) | **235,000** | 22,602 | 294 | 397 | 0.00 | 80 | 32 | 1,537 | 2026-10-28 |
-| 9 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 9 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 10 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
 | 11 | ada-native-visseranalytics | #198 | Ada (GNAT, io_uring) | **226,000** | 21,826 | 309 | 509 | 0.00 | 73 | 31 | 567 | 2026-10-30 |
 | 12 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
 | 13 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
