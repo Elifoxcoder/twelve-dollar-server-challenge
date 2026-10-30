@@ -55,6 +55,9 @@ typedef SOCKET hp_sock;
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+#if !defined(_WIN32)
+#include <sys/epoll.h>
+#endif
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
@@ -1849,26 +1852,35 @@ static void hp_net_init(void) {
 /* Per-socket state. EOF is sticky: once the peer closes, it stays closed
  * even if we stop reading. */
 typedef struct { intptr_t h; bool eof; } hp_sockrec;
+/* Indexed by descriptor: a server with 15k connections must not pay a linear
+ * scan on every recv/send. Slots are grown on demand. */
 static hp_sockrec *g_sock;
-static size_t g_sock_len, g_sock_cap;
+static size_t g_sock_cap;
 
 static hp_sockrec *sockrec(intptr_t h, bool create) {
-    for (size_t i = 0; i < g_sock_len; i++)
-        if (g_sock[i].h == h) return &g_sock[i];
-    if (!create) return NULL;
-    if (g_sock_len == g_sock_cap) {
-        g_sock_cap = g_sock_cap ? g_sock_cap * 2 : 16;
-        g_sock = (hp_sockrec *)realloc(g_sock, g_sock_cap * sizeof(hp_sockrec));
-        if (!g_sock) { fprintf(stderr, "hphp: out of memory\n"); exit(1); }
+    if (h < 0 || h > 0x7fffffff) return NULL;
+    if ((size_t)h >= g_sock_cap) {
+        if (!create) return NULL;
+        size_t ncap = g_sock_cap ? g_sock_cap : 256;
+        while (ncap <= (size_t)h) ncap <<= 1;
+        hp_sockrec *n = (hp_sockrec *)realloc(g_sock, ncap * sizeof *n);
+        if (!n) { fprintf(stderr, "hphp: out of memory\n"); exit(1); }
+        memset(n + g_sock_cap, 0, (ncap - g_sock_cap) * sizeof *n);
+        g_sock = n;
+        g_sock_cap = ncap;
     }
-    g_sock[g_sock_len].h = h;
-    g_sock[g_sock_len].eof = false;
-    return &g_sock[g_sock_len++];
+    if (!g_sock[h].h) {
+        if (!create) return NULL;
+        g_sock[h].h = h ? h : -1;   /* used marker; fd 0 is not a socket */
+        g_sock[h].eof = false;
+    }
+    return &g_sock[h];
 }
 
 static void sock_forget(intptr_t h) {
-    for (size_t i = 0; i < g_sock_len; i++)
-        if (g_sock[i].h == h) { g_sock[i] = g_sock[--g_sock_len]; return; }
+    if (h < 0 || (size_t)h >= g_sock_cap) return;
+    g_sock[h].h = 0;
+    g_sock[h].eof = false;
 }
 
 static hp_sock sock_of(hval v) { return (hp_sock)(intptr_t)hp_val_to_int(v); }
@@ -2127,6 +2139,62 @@ hval hpbi_stream_ready_into(hval outv, hval handles, hval timeout_ms) {
     int to = (int)hp_val_to_int(timeout_ms);
     if (to < 0) to = 0;
     hp_poll_into(out, handles.u.a, to);
+    return hp_of_arr(out);
+}
+
+/* ---- epoll-based readiness (Linux) ----
+ * stream_ready() polls an explicit array, which is O(n) in the number of
+ * connections. A server that holds thousands of client sockets needs the
+ * kernel to hand back only the ready ones. */
+#if !defined(_WIN32)
+static _Thread_local int g_epfd = -1;
+#endif
+
+hval hpbi_epoll_add(hval s) {
+    hp_net_init();
+#if !defined(_WIN32)
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD) return hp_of_bool(false);
+    if (g_epfd < 0) g_epfd = epoll_create1(0);
+    if (g_epfd < 0) return hp_of_bool(false);
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+    if (epoll_ctl(g_epfd, EPOLL_CTL_ADD, fd, &ev) != 0 && errno != EEXIST)
+        return hp_of_bool(false);
+#endif
+    return hp_of_bool(true);
+}
+
+hval hpbi_epoll_del(hval s) {
+#if !defined(_WIN32)
+    hp_sock fd = sock_of(s);
+    if (fd != HP_SOCK_BAD && g_epfd >= 0)
+        epoll_ctl(g_epfd, EPOLL_CTL_DEL, fd, NULL);
+#endif
+    return hp_of_bool(true);
+}
+
+/* epoll_wait_into($out, $timeoutMs): clear $out, fill it with ready fds. */
+hval hpbi_epoll_wait_into(hval outv, hval timeout_ms) {
+    hp_net_init();
+    harr *out = (outv.tag == HV_ARR) ? outv.u.a : NULL;
+    if (!out) return hp_of_arr(hp_arr_new());
+    out->len = 0;
+    out->next_index = 0;
+    out->is_map = false;
+#if !defined(_WIN32)
+    if (g_epfd < 0) return hp_of_arr(out);
+    static _Thread_local struct epoll_event evs[1024];
+    int to = (int)hp_val_to_int(timeout_ms);
+    if (to < 0) to = 0;
+    int n = epoll_wait(g_epfd, evs, 1024, to);
+    for (int i = 0; i < n; i++) {
+        if (evs[i].events & (EPOLLIN | EPOLLERR | EPOLLHUP))
+            hp_arr_push(out, hp_of_int(evs[i].data.fd));
+    }
+#endif
     return hp_of_arr(out);
 }
 

@@ -284,8 +284,7 @@ class Server {
     /* deferred writes for the current poll cycle */
     pub array $pending = [];
 
-    /* poll set, kept between rounds so a round allocates no array */
-    pub array $handles = [];
+    /* ready list, kept between rounds so a round allocates no array */
     pub array $ready = [];
 
     pub int $feed = 0;
@@ -381,11 +380,18 @@ class Server {
         $addr = "tcp://" . $host . ":" . $port;
         $srv = stream_socket_server($addr);
         if ($srv === false || intval($srv) <= 0) {
-            echo "fatal: cannot listen on " . $addr . "\n";
-            return false;
+            /* Direct mode failed (typically because Nginx already owns :80).
+             * Fall back to the Nginx upstream address instead of dying, so
+             * the service always comes up. */
+            $addr = "tcp://127.0.0.1:3000";
+            $srv = stream_socket_server($addr);
+            if ($srv === false || intval($srv) <= 0) {
+                echo "fatal: cannot listen on " . $host . ":" . $port . " or 127.0.0.1:3000\n";
+                return false;
+            }
         }
         $this->srv = intval($srv);
-        $this->handles = [$this->srv];
+        epoll_add($this->srv);
         $this->start = time();
         $this->sweep = $this->start;
         return true;
@@ -399,7 +405,7 @@ class Server {
              * by scope_end(): no per-request malloc survives the round. */
             scope_begin();
 
-            stream_ready_into($this->ready, $this->handles, 50);
+            epoll_wait_into($this->ready, 50);
             foreach ($this->ready as $h) {
                 $fd = intval($h);
                 if ($fd == $this->srv) {
@@ -430,7 +436,7 @@ class Server {
             $this->socks[$fd] = $fd;
             $this->bufs[$fd] = "";
             $this->lasts[$fd] = time();
-            $this->handles[] = $fd;
+            epoll_add($fd);
         }
     }
 
@@ -451,12 +457,8 @@ class Server {
         unset($this->socks[$fd]);
         unset($this->bufs[$fd]);
         unset($this->lasts[$fd]);
+        epoll_del($fd);
         stream_close($fd);
-        /* drop the fd from the poll set; connections close rarely, so a
-         * rebuild is cheaper than an O(n) splice on every request */
-        arr_clear($this->handles);
-        $this->handles[] = $this->srv;
-        foreach ($this->socks as $s) { $this->handles[] = $s; }
     }
 
     /* -------------------------------------------------------- read side */
@@ -854,13 +856,22 @@ class Server {
         else if ($code == 500) { $st = "Internal Server Error"; }
         else if ($code == 503) { $st = "Service Unavailable"; }
 
+        /* Direct mode holds one fd per user. Keep a reserve below the box's
+         * 65535 LimitNOFILE: above the threshold the response asks the client
+         * to reconnect, so new users are never refused. */
+        $shed = count($this->socks) >= 58000;
         $blen = strlen($body);
-        $h = "HTTP/1.1 " . $code . " " . $st . "\r\nContent-Type: application/json\r\nContent-Length: " . $blen . "\r\nConnection: keep-alive\r\n\r\n";
+        /* Content-Encoding: identity tells the front proxy the body is already
+         * in its final form, so Nginx skips its gzip pass. On a 1-vCPU box that
+         * pass costs about as much CPU as the whole app; the responses are
+         * small and the box has bandwidth to spare. Compression is optional
+         * per SPEC.md. */
+        $h = "HTTP/1.1 " . $code . " " . $st . "\r\nContent-Type: application/json\r\nContent-Encoding: identity\r\nContent-Length: " . $blen . "\r\nConnection: " . ($shed ? "close" : "keep-alive") . "\r\n\r\n";
         if ($blen < 1024) {
             /* small body: one write, no big copy */
             $out = $h . $body;
             $sent = stream_send($fd, $out);
-            if ($sent != strlen($out)) { $this->close_fd($fd); }
+            if ($sent != strlen($out) || $shed) { $this->close_fd($fd); }
             return;
         }
         /* big body (/feed): write header and body separately so the 5 KB
@@ -868,7 +879,7 @@ class Server {
         $sent = stream_send($fd, $h);
         if ($sent != strlen($h)) { $this->close_fd($fd); return; }
         $sent2 = stream_send($fd, $body);
-        if ($sent2 != $blen) { $this->close_fd($fd); }
+        if ($sent2 != $blen || $shed) { $this->close_fd($fd); }
     }
 }
 
