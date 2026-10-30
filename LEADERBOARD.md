@@ -19,7 +19,8 @@ its merged code is newer than what was scored (`a08923d`). go-epoll-MegaPanchamZ
 merged yet); its merged #137 code (`b2a5207`) held 235,000. fsharp-kestrel-delneg is scored at its follow-up PR #201
 (`a8bf27f`); its earlier #142 run (`45ebea5`) held 260,000. c-iouring-moneebullah25 is scored at its follow-up PR
 #203 (`3f0c2c1`); its earlier #156 run (`065c235`) held 209,000. asm-epoll-HauLTCE is scored at its follow-up PR #207
-(`d273c86`); its earlier #130 run (`8c3c277`) held 120,000.
+(`d273c86`); its earlier #130 run (`8c3c277`) held 120,000. ada-native-visseranalytics is scored at its follow-up PR
+#211 (`7ff01df`); its earlier #198 run (`bb6aee1`) held 226,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -33,17 +34,17 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
 | 2 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 3 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **266,000** | 25,525 | 17 | 113 | 0.00 | 70 | 25 | 1,206 | 2026-10-30 |
-| 4 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 5 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
-| 5 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 7 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 8 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
-| 8 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring) | **240,000** | 23,184 | 202 | 300 | 0.00 | 78 | 31 | 788 | 2026-10-28 |
-| 10 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 11 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 12 | c-iouring-moneebullah25 | #203 | C (io_uring) | **230,000** | 22,377 | 9.3 | 37 | 0.00 | 66 | 27 | 1,106 | 2026-10-30 |
-| 13 | ada-native-visseranalytics | #198 | Ada (GNAT, io_uring) | **226,000** | 21,826 | 309 | 509 | 0.00 | 73 | 31 | 567 | 2026-10-30 |
+| 2 | ada-native-visseranalytics | #211 | Ada (GNAT, io_uring) | **270,000** | 25,872 | 33 | 177 | 0.00 | 81 | 28 | 1,040 | 2026-10-30 |
+| 4 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **266,000** | 25,525 | 17 | 113 | 0.00 | 70 | 25 | 1,206 | 2026-10-30 |
+| 5 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 6 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
+| 6 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 8 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 9 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
+| 9 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring) | **240,000** | 23,184 | 202 | 300 | 0.00 | 78 | 31 | 788 | 2026-10-28 |
+| 11 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 12 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 13 | c-iouring-moneebullah25 | #203 | C (io_uring) | **230,000** | 22,377 | 9.3 | 37 | 0.00 | 66 | 27 | 1,106 | 2026-10-30 |
 | 14 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
 | 15 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
 | 15 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
