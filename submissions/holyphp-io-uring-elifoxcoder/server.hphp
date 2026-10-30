@@ -329,7 +329,12 @@ class Server {
            . ") ) || '}' "
            . "FROM (SELECT p.id, p.body, p.created_at, u.username AS author "
            . "FROM posts p JOIN users u ON u.id = p.user_id "
-           . "ORDER BY p.created_at DESC, p.id DESC LIMIT 20) p";
+           /* ids are assigned in insert order and created_at is set from the
+            * clock at the same moment, so id DESC is the same order as
+            * created_at DESC, id DESC (verified byte-identical against
+            * test/golden/feed.json) and it walks the rowid index instead of
+            * a second index plus scattered row lookups. */
+           . "ORDER BY p.id DESC LIMIT 20) p";
         $this->feed = sqlite_prepare($db, $q);
         if ($this->feed == 0) {
             echo "fatal: feed query: " . sqlite_errmsg($db) . "\n";
@@ -410,7 +415,12 @@ class Server {
                 $fd = intval($h);
                 if ($fd == $this->srv) {
                     $this->accept_all();
-                } else if (isset($this->socks[$fd])) {
+                } else {
+                    /* Every fd in the epoll set came from accept(), so it is
+                     * ours even if the bookkeeping array lost the entry.
+                     * read_fd() closes it on EOF, which also drops the epoll
+                     * registration — never skip a ready fd, or the loop
+                     * spins on it forever. */
                     $this->read_fd($fd);
                 }
             }
