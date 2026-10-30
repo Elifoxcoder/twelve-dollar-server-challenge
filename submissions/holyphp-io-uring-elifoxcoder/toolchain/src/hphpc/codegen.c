@@ -709,7 +709,8 @@ static void emit_binop(Codegen *g, Expr *e, Buf *dst) {
     }
     switch (op) {
     case T_PLUS:
-        if (numeric) buf_printf(dst, "((%s) + (%s))", ls, rs);
+        if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) + (%s))", ls, rs);
+        else if (numeric) buf_printf(dst, "((%s) + (%s))", ls, rs);
         /* the runtime's hp_add keeps PHP semantics (numeric strings add as
          * numbers), so only project to hstr* when the node is typed string */
         else if (e->type && e->type->kind == TY_STRING)
@@ -718,7 +719,8 @@ static void emit_binop(Codegen *g, Expr *e, Buf *dst) {
             buf_printf(dst, "hp_add(hv(%s), hv(%s))", ls, rs);
         break;
     case T_MINUS:
-        if (numeric) buf_printf(dst, "((%s) - (%s))", ls, rs);
+        if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) - (%s))", ls, rs);
+        else if (numeric) buf_printf(dst, "((%s) - (%s))", ls, rs);
         else buf_printf(dst, "hpbi_scalar_sub(hv(%s), hv(%s))", ls, rs);
         break;
     case T_STAR:
@@ -2631,7 +2633,17 @@ static void emit_expr(Codegen *g, Expr *e, Buf *dst) {
         Buf o;
         buf_init(&o);
         emit_expr(g, e->u.deref.operand, &o);
-        buf_printf(dst, "(*%s)", buf_take(&o));
+        /* raw pointers are void*: cast to the pointee type so *p reads the
+         * right width (a byte for *u8, not eight bytes) */
+        const Type *pt = e->u.deref.operand->type;
+        const char *ct = "int64_t";
+        if (pt && pt->kind == TY_PTR && pt->elem) {
+            if (pt->elem->kind == TY_I8)
+                ct = "unsigned char";
+            else
+                ct = ctype_of(pt->elem);
+        }
+        buf_printf(dst, "(*(%s *)(%s))", ct, buf_take(&o));
         free(o.data);
         break;
     }

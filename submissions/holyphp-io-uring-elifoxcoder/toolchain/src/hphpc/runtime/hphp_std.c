@@ -2036,18 +2036,24 @@ hval hpbi_stream_recv(hval s, hval maxn) {
     int64_t want = hp_val_to_int(maxn);
     if (want <= 0) want = 4096;
     if (want > (1 << 20)) want = (1 << 20);
-    char *buf = (char *)malloc((size_t)want);
-    if (!buf) return hp_of_str(hp_str_lit(""));
+    /* one reusable buffer per thread instead of a malloc/free per recv */
+    static _Thread_local char *g_rbuf = NULL;
+    static _Thread_local size_t g_rbuf_cap = 0;
+    if ((size_t)want > g_rbuf_cap) {
+        char *nb = (char *)realloc(g_rbuf, (size_t)want);
+        if (!nb) return hp_of_str(hp_null_str());
+        g_rbuf = nb;
+        g_rbuf_cap = (size_t)want;
+    }
+    char *buf = g_rbuf;
     int r = recv(fd, buf, (int)want, 0);
     bool blocked = (r < 0) && hp_sock_wouldblock();
     if (r <= 0 && !blocked)
         sockrec((intptr_t)fd, true)->eof = true;
     if (r > 0) {
         hstr *out = hp_str_new(buf, (size_t)r);
-        free(buf);
         return hp_of_str(out);
     }
-    free(buf);
     if (r == 0) {                    /* orderly shutdown by the peer */
         sockrec((intptr_t)fd, true)->eof = true;
         return hp_of_str(hp_str_lit(""));
@@ -4622,6 +4628,164 @@ hval hpbi_arr_clear(hval a) {
 hval hpbi_arr_free(hval a) {
     if (a.tag == HV_ARR && a.u.a) hp_arr_free(a.u.a);
     return hp_of_bool(true);
+}
+
+/* ---- generic B-tree cursor binding ----
+ * The implementation is appended to the SQLite amalgamation by build.sh
+ * (toolchain/src/hp_btree.c) and exported as hp_bt_*_impl. A weak reference
+ * keeps the program linkable against the system library: the builtins then
+ * report failure and the server uses its SQL path. */
+#if defined(__GNUC__)
+#define HP_BT_WEAK __attribute__((weak))
+#else
+#define HP_BT_WEAK
+#endif
+HP_BT_WEAK unsigned int hp_bt_root_impl(sqlite3 *db, const char *z, int i);
+HP_BT_WEAK void *hp_bt_open_impl(sqlite3 *db, const char *z, int isidx);
+HP_BT_WEAK void hp_bt_close_impl(void *v);
+HP_BT_WEAK int hp_bt_first_impl(void *v);
+HP_BT_WEAK int hp_bt_last_impl(void *v);
+HP_BT_WEAK int hp_bt_next_impl(void *v);
+HP_BT_WEAK int hp_bt_prev_impl(void *v);
+HP_BT_WEAK int hp_bt_seek_impl(void *v, int64_t r);
+HP_BT_WEAK int64_t hp_bt_rowid_impl(void *v);
+HP_BT_WEAK const unsigned char *hp_bt_payload_impl(void *v, int *pn);
+
+static void *bt_h(hval v) { return (void *)(intptr_t)hp_val_to_int(v); }
+
+hval hpbi_bt_root(hval dbv, hval name, hval isidx) {
+    sqlite3 *db = hp_sqlite_db(dbv);
+    hstr *s = hp_val_to_str(name);
+    return hp_of_int(hp_bt_root_impl ? (int64_t)hp_bt_root_impl(db, s->data, (int)hp_val_to_int(isidx)) : 0);
+}
+hval hpbi_bt_open(hval dbv, hval name, hval isidx) {
+    sqlite3 *db = hp_sqlite_db(dbv);
+    hstr *s;
+    if (!hp_bt_open_impl) return hp_of_int(0);
+    s = hp_val_to_str(name);
+    return hp_of_int((int64_t)(intptr_t)hp_bt_open_impl(db, s->data, (int)hp_val_to_int(isidx)));
+}
+hval hpbi_bt_close(hval h) { if (hp_bt_close_impl) hp_bt_close_impl(bt_h(h)); return hp_of_bool(true); }
+hval hpbi_bt_first(hval h) { return hp_of_int(hp_bt_first_impl ? hp_bt_first_impl(bt_h(h)) : -1); }
+hval hpbi_bt_last(hval h) { return hp_of_int(hp_bt_last_impl ? hp_bt_last_impl(bt_h(h)) : -1); }
+hval hpbi_bt_next(hval h) { return hp_of_int(hp_bt_next_impl ? hp_bt_next_impl(bt_h(h)) : 0); }
+hval hpbi_bt_prev(hval h) { return hp_of_int(hp_bt_prev_impl ? hp_bt_prev_impl(bt_h(h)) : 0); }
+hval hpbi_bt_seek(hval h, hval rowid) { return hp_of_int(hp_bt_seek_impl ? hp_bt_seek_impl(bt_h(h), (int64_t)hp_val_to_int(rowid)) : -1); }
+hval hpbi_bt_rowid(hval h) { return hp_of_int(hp_bt_rowid_impl ? hp_bt_rowid_impl(bt_h(h)) : -1); }
+hval hpbi_bt_payload_ptr(hval h) {
+    int n = 0;
+    const unsigned char *p;
+    if (!hp_bt_payload_impl) return hp_of_int(0);
+    p = hp_bt_payload_impl(bt_h(h), &n);
+    return hp_of_int((int64_t)(intptr_t)p);
+}
+hval hpbi_bt_payload_size(hval h) {
+    int n = 0;
+    if (!hp_bt_payload_impl) return hp_of_int(0);
+    (void)hp_bt_payload_impl(bt_h(h), &n);
+    return hp_of_int(n);
+}
+
+/* ---- generic string builder ---- */
+typedef struct { Buf b; } HpSb;
+static HpSb *sb_h(hval v) { return (HpSb *)(intptr_t)hp_val_to_int(v); }
+
+hval hpbi_sb_new(void) {
+    HpSb *s = (HpSb *)hp_alloc(sizeof *s);
+    hbuf_init(&s->b);
+    return hp_of_int((int64_t)(intptr_t)s);
+}
+hval hpbi_sb_put(hval h, hval str) {
+    HpSb *s = sb_h(h);
+    hstr *x = hp_val_to_str(str);
+    hbuf_write(&s->b, x->data, x->len);
+    return hp_of_bool(true);
+}
+hval hpbi_sb_bytes(hval h, hval ptr, hval len) {
+    HpSb *s = sb_h(h);
+    int64_t n = hp_val_to_int(len);
+    const char *p = (const char *)(intptr_t)hp_val_to_int(ptr);
+    if (p && n > 0) hbuf_write(&s->b, p, (size_t)n);
+    return hp_of_bool(true);
+}
+hval hpbi_sb_int(hval h, hval n) {
+    HpSb *s = sb_h(h);
+    long long v = (long long)hp_val_to_int(n);
+    char tmp[24];
+    int i = 24;
+    unsigned long long u = v < 0 ? -(unsigned long long)v : (unsigned long long)v;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
+    if (v < 0) tmp[--i] = '-';
+    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    return hp_of_bool(true);
+}
+/* append a quoted, escaped JSON string for n bytes at p. Runs of ordinary
+ * bytes are copied in one go: escaping a 500-byte body must not cost 500
+ * calls with a capacity check each. */
+static void sb_json_esc(Buf *b, const unsigned char *p, size_t n) {
+    static const char H[] = "0123456789abcdef";
+    /* one lookup per byte instead of a chain of comparisons */
+    static unsigned char esc[256];
+    static int esc_ready = 0;
+    size_t i, start = 0;
+    if (!esc_ready) {
+        int k;
+        for (k = 0; k < 256; k++) esc[k] = (unsigned char)(k < 0x20 || k == '"' || k == '\\');
+        esc_ready = 1;
+    }
+    hbuf_putc(b, '"');
+    for (i = 0; i < n; i++) {
+        unsigned char c = p[i];
+        if (esc[c]) {
+            if (i > start) hbuf_write(b, (const char *)p + start, i - start);
+            if (c == '"' || c == '\\') { hbuf_putc(b, '\\'); hbuf_putc(b, (char)c); }
+            else if (c == '\n') hbuf_puts(b, "\\n");
+            else if (c == '\r') hbuf_puts(b, "\\r");
+            else if (c == '\t') hbuf_puts(b, "\\t");
+            else {
+                hbuf_puts(b, "\\u00");
+                hbuf_putc(b, H[(c >> 4) & 15]);
+                hbuf_putc(b, H[c & 15]);
+            }
+            start = i + 1;
+        }
+    }
+    if (n > start) hbuf_write(b, (const char *)p + start, n - start);
+    hbuf_putc(b, '"');
+}
+hval hpbi_sb_json(hval h, hval ptr, hval len) {
+    HpSb *s = sb_h(h);
+    const unsigned char *p = (const unsigned char *)(intptr_t)hp_val_to_int(ptr);
+    int64_t n = hp_val_to_int(len);
+    if (p && n > 0) sb_json_esc(&s->b, p, (size_t)n);
+    else hbuf_puts(&s->b, "\"\"");
+    return hp_of_bool(true);
+}
+hval hpbi_sb_json_str(hval h, hval str) {
+    HpSb *s = sb_h(h);
+    hstr *x = hp_val_to_str(str);
+    sb_json_esc(&s->b, (const unsigned char *)x->data, x->len);
+    return hp_of_bool(true);
+}
+hval hpbi_sb_reserve(hval h, hval n) {
+    HpSb *s = sb_h(h);
+    int64_t want = hp_val_to_int(n);
+    if (want > 0) hbuf_reserve(&s->b, (size_t)want);
+    return hp_of_bool(true);
+}
+hval hpbi_str_from_bytes(hval ptr, hval len) {
+    const char *p = (const char *)(intptr_t)hp_val_to_int(ptr);
+    int64_t n = hp_val_to_int(len);
+    if (!p || n < 0) return hp_of_str(hp_null_str());
+    return hp_of_str(hp_str_new(p, (size_t)n));
+}
+hval hpbi_sb_take(hval h) {
+    HpSb *s = sb_h(h);
+    char *p = hbuf_take(&s->b);
+    hstr *r = hp_str_new(p, strlen(p));
+    free(p);
+    free(s);
+    return hp_of_str(r);
 }
 
 hval hpbi_sqlite_open(hval path) {

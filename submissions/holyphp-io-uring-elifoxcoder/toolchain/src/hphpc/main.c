@@ -851,9 +851,13 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
                              "-luuid -lversion -lshlwapi -lwinmm",
                              opt, subsys, objlist, out);
 #else
-            /* POSIX: sockets live in libc, the UI layer is inert stubs */
-            char *link = fmt("gcc %s %s -o %s -lm -lpthread -lsqlite3",
-                             opt, objlist, out);
+            /* POSIX: sockets live in libc, the UI layer is inert stubs.
+             * HPHP_SQLITE_LIB points at a static SQLite built by build.sh
+             * (THREADSAFE=0); without it the system library is used. */
+            const char *slib = getenv("HPHP_SQLITE_LIB");
+            char *link = (slib && *slib)
+                ? fmt("gcc %s %s -o %s -lm -lpthread %s", opt, objlist, out, slib)
+                : fmt("gcc %s %s -o %s -lm -lpthread -lsqlite3", opt, objlist, out);
 #endif
             rc = run_direct(link, !verbose);
             if (verbose) fprintf(stderr, "[hphp backend] gcc-fallback rc=%d nonempty=%d exe=%d\n",
