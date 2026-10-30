@@ -33,24 +33,24 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | # | Submission | PR | Language | Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | µs/req | RAM MB | Scored |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
-| 2 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 2 | ada-native-visseranalytics | #211 | Ada (GNAT, io_uring) | **270,000** | 25,872 | 33 | 177 | 0.00 | 81 | 28 | 1,040 | 2026-10-30 |
-| 4 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **266,000** | 25,525 | 17 | 113 | 0.00 | 70 | 25 | 1,206 | 2026-10-30 |
-| 5 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 6 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
-| 6 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 8 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 9 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
-| 9 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring) | **240,000** | 23,184 | 202 | 300 | 0.00 | 78 | 31 | 788 | 2026-10-28 |
-| 11 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 12 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 13 | c-iouring-moneebullah25 | #203 | C (io_uring) | **230,000** | 22,377 | 9.3 | 37 | 0.00 | 66 | 27 | 1,106 | 2026-10-30 |
-| 14 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 15 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
-| 15 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
-| 15 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
-| 18 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
-| 19 | c-rawsqlite-larvance | #210 | C (io_uring, own SQLite-format engine, no libsqlite3) | **195,000** | 19,199 | 1.3 | 11.5 | 0.00 | 56 | 27 | 908 | 2026-10-30 |
+| 1 | c-rawsqlite-larvance | #210 | C (io_uring, own SQLite-format engine, no libsqlite3) | **280,000** | 26,769 | 8.6 | 23.5 | 0.00 | 74 | 25 | 1,429 | 2026-10-30 |
+| 3 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
+| 3 | ada-native-visseranalytics | #211 | Ada (GNAT, io_uring) | **270,000** | 25,872 | 33 | 177 | 0.00 | 81 | 28 | 1,040 | 2026-10-30 |
+| 5 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **266,000** | 25,525 | 17 | 113 | 0.00 | 70 | 25 | 1,206 | 2026-10-30 |
+| 6 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 7 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
+| 7 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 9 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 10 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
+| 10 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring) | **240,000** | 23,184 | 202 | 300 | 0.00 | 78 | 31 | 788 | 2026-10-28 |
+| 12 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 13 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 14 | c-iouring-moneebullah25 | #203 | C (io_uring) | **230,000** | 22,377 | 9.3 | 37 | 0.00 | 66 | 27 | 1,106 | 2026-10-30 |
+| 15 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 16 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
+| 16 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
+| 16 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
+| 19 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
 | 20 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
 | 20 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
 | 22 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
@@ -361,9 +361,8 @@ committed in this repo.
   held open for Arjay (rules 2/3 question). The author offers to drop `td_sqlite.c` if reads must go through SQL.
 - **c-rawsqlite-larvance #210 doesn't use the SQLite library at all**: `raw_sqlite.c` is a from-scratch C engine that
   reads and writes the SQLite B-tree + WAL file format directly (no libsqlite3, no -shm/locking, only 2-level page
-  splits; WAL pwrite errors aren't checked). `GET /feed` assumes dense rowids (last 20 by rowid, no SQL fallback).
-  This goes further than the B-tree-cursor entries #153/#158/#191. Scored as submitted (195k); held open for Arjay
-  (rules 1/2/6 question).
+  splits). This goes further than the B-tree-cursor entries #153/#158/#191. Scored as submitted (280k at `15e3271`;
+  195k at `0e7bc24`); held open for Arjay (rules 1/2/6 question).
 - **python-pyrustapi #147 serves its reads from the `pyrustapi` package's native SQL tier** (`sql=` route options),
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
