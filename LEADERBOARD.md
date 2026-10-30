@@ -71,7 +71,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 42 | zig-usockets-tbsvttr | #25 | Zig (uSockets) | **110,000** | 10,442 | 335 | 721 | 0.00 | 90 | 80 | 188 | 2026-10-26 |
 | 43 | c-epoll-TheFirstIstari | #64 | C (epoll) | **107,000** | 10,493 | 212 | 409 | 0.94 | 78 | 69 | 169 | 2026-10-21 |
 | 44 | java-nio-stohirov | #88 | Java (FFM epoll) | **102,000** | 10,023 | 86 | 128 | 0.85 | 66 | 61 | 555 | 2026-10-21 |
-| 45 | v-epoll-i098 | #113 | V | **100,000** | 9,848 | 1.5 | 2.9 | 0.51 | 76 | 72 | 384 | 2026-10-21 |
+| 45 | v-epoll-i098 | #113 | V | **100,000** ᵛ | 9,848 | 1.5 | 2.9 | 0.51 | 76 | 72 | 384 | 2026-10-21 |
 | 46 | node-uwebsockets-zahidcakici | #102 | Node (uWebSockets) | **97,000** | 9,471 | 264 | 484 | 0.00 | 92 | 90 | 336 | 2026-10-21 |
 | 47 | typescript-bun-xxmohamed012 | #3 | Bun | **90,000** | 8,826 | 140 | 359 | 0.00 | 83 | 87 | 301 | 2026-10-21 |
 | 47 | scala-netty-jacksonhoran | #107 | Scala (Netty) | **90,000** | 8,801 | 484 | 757 | 0.00 | 87 | 92 | 825 | 2026-10-21 |
@@ -167,7 +167,6 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | goose-native-tbsvttr | #143 | Goose (native) | **failed** (install OOM) | | | | | | | | 2026-10-28 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
 | — | rust-hyper-dannie203 | #178 | Rust (hyper) | **failed** (build: no cargo) | | | | | | | | 2026-10-29 |
-| — | v-epoll-i098 (follow-up #191) | #191 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-29 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -177,6 +176,12 @@ ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s 
 conflicts with the merged #82 folder) scored **230,000** on the standard 4-source-IP setup (22,384 req/s, p95 14 / p99
 62 ms, 0 err, 91 % CPU, 37 µs/req, 931 MB, 2026-10-28) and is CPU-bound, not source-port-bound: 240,000 failed at 95 % CPU
 (p99 1.5 s). The row above stays on #82's merged code until #141 is rebased and merged.
+
+ᵛ **V #113's follow-up #191** (`47a4cbb`, io_uring fixed files, SQLite B-tree reads; held, not merged: see the rule
+flags) scored **257,000** (24,766 req/s, p95 13.5 / p99 29 ms, 0 err, 74 % CPU, 27 µs/req, 732 MB, 2026-10-30; an
+earlier attempt at `0ed86bf` hit the 1-hour install timeout). 270,000 passed the 2-minute probe but failed the 5-minute
+hold with 60 % errors, nearly all `connection refused` from mid-hold on (the app stopped accepting). The row above
+stays on #113's merged code until #191 is merged.
 
 ᶠ **The 65,535 file-descriptor limit, not speed.** These twenty-one serve 65,535 keep-alive users and the rest wait in the
 listen queue until mload's 60 s timeout. Each scored run shows exactly ~21,900 timeouts = 0.93 % of requests, just under the
@@ -286,10 +291,6 @@ committed in this repo.
 - **Rust #178 — build failed** (`6aa144b`): `install.sh` installs Rust with rustup into root's `~/.cargo`, but
   `build.sh` runs as the `deploy` user, which has no `cargo` (exit 127), so the app never built (1/42 tests). CI passed
   because GitHub's runner has Rust preinstalled. Not patched.
-- **V #191 — install failed** (`0ed86bf`, follow-up to merged v-epoll-i098 #113, whose 100,000 row above stays):
-  `install.sh` bootstraps V 0.5.2 from source (`vc/v.c` → `v1` → `v2` → `v`), and on the 1 vCPU box it was still
-  compiling when the install hit its 1-hour timeout (exit 124; no OOM kill this time), so `/opt/v/v` was never installed
-  and the app couldn't build (1/42 tests). Not patched.
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
@@ -325,8 +326,8 @@ committed in this repo.
   5-minute hold failed (0.62 %: 503s plus timeouts, p99 15 s). (The earlier 266,000 at 1b4cb97 had 0.60 % errors, all
   HTTP 503.) Scored as submitted (271k); held open for Arjay (rules 1/3/5/7 question).
 - **v-epoll-i098's follow-up #191** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`td_sqlite.c`,
-  like lean-derive #153; amalgamation not patched; SQL fallback). Not scored yet (install timeout, see failures); held
-  open for Arjay (rules 2/3 question). The author offers to drop `td_sqlite.c` if reads must go through SQL.
+  like lean-derive #153; amalgamation not patched; SQL fallback). Scored as submitted (257k at `47a4cbb`, footnote ᵛ);
+  held open for Arjay (rules 2/3 question). The author offers to drop `td_sqlite.c` if reads must go through SQL.
 - **python-pyrustapi #147 serves its reads from the `pyrustapi` package's native SQL tier** (`sql=` route options),
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
