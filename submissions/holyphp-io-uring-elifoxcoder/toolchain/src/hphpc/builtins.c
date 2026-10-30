@@ -284,10 +284,14 @@ void builtins_init(void) {
     add("stream_ready_into",    B_MISC, type_array_of(ty_mixed), false, false);
     add("epoll_add",            B_MISC, ty_bool,   false, false);
     add("epoll_del",            B_MISC, ty_bool,   false, false);
+    add("epoll_mod",            B_MISC, ty_bool,   false, false);
+    add("epoll_wait2",          B_MISC, ty_bool,   false, false);
     add("epoll_wait_into",      B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_recv",          B_MISC, ty_string, false, false);
     add("stream_send",          B_MISC, ty_int,    false, false);
     add("stream_send2",         B_MISC, ty_int,    false, false);
+    add("stream_send_nb",       B_MISC, ty_int,    false, false);
+    add("stream_send2_nb",      B_MISC, ty_int,    false, false);
     add("nofile_limit",         B_ZERO, ty_int,    false, false);
     add("stream_eof",           B_MISC, ty_bool,   false, false);
     add("stream_peer",          B_MISC, ty_string, false, false);

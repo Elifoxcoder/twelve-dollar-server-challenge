@@ -2098,6 +2098,39 @@ hval hpbi_nofile_limit(void) {
 #endif
 }
 
+/* Two buffers, one writev(2), no blocking: the header and the body go out
+ * together without copying the body. Returns bytes written, -1 would-block,
+ * -2 error. */
+hval hpbi_stream_send2_nb(hval s, hval a, hval b) {
+    hp_net_init();
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD) return hp_of_int(-2);
+    hstr *x = hp_val_to_str(a);
+    hstr *y = hp_val_to_str(b);
+#if defined(_WIN32)
+    /* no writev: one concatenated send (the caller buffers the remainder the
+     * same way, the bytes are identical) */
+    size_t n = x->len + y->len;
+    char *tmp = malloc(n ? n : 1);
+    if (!tmp) return hp_of_int(-2);
+    memcpy(tmp, x->data, x->len);
+    memcpy(tmp + x->len, y->data, y->len);
+    int r = (int)send(fd, tmp, (int)n, 0);
+    free(tmp);
+    if (r >= 0) return hp_of_int(r);
+    return hp_of_int(hp_sock_wouldblock() ? -1 : -2);
+#else
+    struct iovec iov[2];
+    iov[0].iov_base = x->data;
+    iov[0].iov_len = x->len;
+    iov[1].iov_base = y->data;
+    iov[1].iov_len = y->len;
+    ssize_t r = writev(fd, iov, 2);
+    if (r >= 0) return hp_of_int((int64_t)r);
+    return hp_of_int(hp_sock_wouldblock() ? -1 : -2);
+#endif
+}
+
 /* Two buffers, one syscall: the header and the body of a response without
  * copying the body into a new string. Returns the bytes written. */
 hval hpbi_stream_send2(hval s, hval a, hval b) {
@@ -2234,6 +2267,62 @@ hval hpbi_epoll_del(hval s) {
         epoll_ctl(g_epfd, EPOLL_CTL_DEL, fd, NULL);
 #endif
     return hp_of_bool(true);
+}
+
+/* epoll_mod($fd, $mask): 1 = readable, 2 = writable (or both). */
+hval hpbi_epoll_mod(hval s, hval mask) {
+    hp_net_init();
+#if !defined(_WIN32)
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD || g_epfd < 0) return hp_of_bool(false);
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    int m = (int)hp_val_to_int(mask);
+    if (m & 1) ev.events |= EPOLLIN;
+    if (m & 2) ev.events |= EPOLLOUT;
+    ev.data.fd = fd;
+    if (epoll_ctl(g_epfd, EPOLL_CTL_MOD, fd, &ev) != 0) return hp_of_bool(false);
+#endif
+    return hp_of_bool(true);
+}
+
+/* epoll_wait2($readable, $writable, $timeoutMs): fills both lists. */
+hval hpbi_epoll_wait2(hval inv, hval outv, hval timeout_ms) {
+    hp_net_init();
+    harr *in = (inv.tag == HV_ARR) ? inv.u.a : NULL;
+    harr *out = (outv.tag == HV_ARR) ? outv.u.a : NULL;
+    if (in) { in->len = 0; in->next_index = 0; in->is_map = false; }
+    if (out) { out->len = 0; out->next_index = 0; out->is_map = false; }
+#if !defined(_WIN32)
+    if (g_epfd < 0) return hp_of_bool(true);
+    static _Thread_local struct epoll_event evs[1024];
+    int to = (int)hp_val_to_int(timeout_ms);
+    if (to < 0) to = 0;
+    int n = epoll_wait(g_epfd, evs, 1024, to);
+    for (int i = 0; i < n; i++) {
+        unsigned int e = evs[i].events;
+        if ((e & (EPOLLIN | EPOLLERR | EPOLLHUP)) && in)
+            hp_arr_push(in, hp_of_int(evs[i].data.fd));
+        if ((e & EPOLLOUT) && out)
+            hp_arr_push(out, hp_of_int(evs[i].data.fd));
+    }
+#endif
+    return hp_of_bool(true);
+}
+
+/* stream_send_nb($fd, $data): one send(2). Returns the bytes written, -1 if
+ * the socket would block, -2 on error. The caller buffers the remainder and
+ * asks for EPOLLOUT; the loop must never sleep on a slow peer. */
+hval hpbi_stream_send_nb(hval s, hval data) {
+    hp_net_init();
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD) return hp_of_int(-2);
+    hstr *d = hp_val_to_str(data);
+    if (d->len == 0) return hp_of_int(0);
+    int r = (int)send(fd, d->data, (int)d->len, 0);
+    if (r >= 0) return hp_of_int(r);
+    if (hp_sock_wouldblock()) return hp_of_int(-1);
+    return hp_of_int(-2);
 }
 
 /* epoll_wait_into($out, $timeoutMs): clear $out, fill it with ready fds. */

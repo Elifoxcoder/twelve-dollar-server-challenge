@@ -299,6 +299,16 @@ class Server {
     pub int $shedAt = 58000;
     pub int $paused = 0;
 
+    /* Responses that did not fit into the socket buffer: the rest is written
+     * when epoll reports EPOLLOUT instead of sleeping in the loop. */
+    pub array $out = [];
+    pub array $closing = [];
+    pub array $writable = [];
+
+    /* Idle sweep, a slice per cycle instead of one O(n) pass */
+    pub array $sockList = [];
+    pub int $sweepPos = 0;
+
     pub int $feed = 0;
     pub int $post = 0;
     pub int $health = 0;
@@ -453,19 +463,33 @@ class Server {
     /* -------------------------------------------------------- main loop */
 
     public function handle_ready(): void {
+        /* finish pending responses before reading new requests */
+        foreach ($this->writable as $w) {
+            $fd = intval($w);
+            if (isset($this->out[$fd])) { $this->flush_fd($fd); }
+        }
         foreach ($this->ready as $h) {
             $fd = intval($h);
-            if ($fd == $this->srv) {
-                $this->accept_all();
-            } else {
-                /* Every fd in the epoll set came from accept(), so it is
-                 * ours even if the bookkeeping array lost the entry.
-                 * read_fd() closes it on EOF, which also drops the epoll
-                 * registration — never skip a ready fd, or the loop
-                 * spins on it forever. */
-                $this->read_fd($fd);
-            }
+            if ($fd == $this->srv) { $this->accept_all(); continue; }
+            if (!isset($this->socks[$fd])) { continue; }
+            if (isset($this->out[$fd])) { continue; }   /* write still pending */
+            $this->read_fd($fd);
         }
+    }
+
+    /* Write as much of the pending response as the socket takes; the rest
+     * stays buffered until epoll reports the socket writable again. */
+    public function flush_fd(int $fd): void {
+        $data = $this->out[$fd];
+        $sent = stream_send_nb($fd, $data);
+        if ($sent < 0) { $this->close_fd($fd); return; }
+        if ($sent < strlen($data)) {
+            $this->out[$fd] = substr($data, $sent);
+            return;
+        }
+        unset($this->out[$fd]);
+        if (isset($this->closing[$fd])) { $this->close_fd($fd); return; }
+        epoll_mod($fd, 1);
     }
 
     public function run(): void {
@@ -474,32 +498,28 @@ class Server {
              * by scope_end(): no per-request malloc survives the round. */
             scope_begin();
 
-            epoll_wait_into($this->ready, 50);
+            epoll_wait2($this->ready, $this->writable, 50);
             $this->handle_ready();
             /* A transaction has a fixed cost; when only a few writes are
              * pending, wait up to a millisecond for more requests before
              * committing. That batches them without hurting the tail much. */
             $n = count($this->pending);
             if ($n > 0 && $n < 32) {
-                epoll_wait_into($this->ready, 1);
+                epoll_wait2($this->ready, $this->writable, 1);
                 $this->handle_ready();
             }
             $this->execute_writes();
 
-            $now = time();
-            /* Sweeping 110k sockets every second is pure overhead; every five
-             * seconds still expires idle connections well after the 90 s
-             * the spec asks for. */
-            if ($now - $this->sweep >= 5) {
-                $this->sweep = $now;
-                $this->expire($now);
-            }
+            /* Idle sweep: a bounded slice per cycle, so 110k sockets never
+             * turn into one long stall. */
+            $this->expire(time());
 
             scope_end();
         }
     }
 
-    public function accept_all(): void {        while (true) {
+    public function accept_all(): void {
+        while (true) {
             $s = stream_socket_accept2($this->srv, 0);
             if ($s === false) {
                 /* Out of descriptors: stop watching the listener so a
@@ -517,27 +537,41 @@ class Server {
             $this->socks[$fd] = $fd;
             $this->bufs[$fd] = "";
             $this->lasts[$fd] = time();
+            $this->sockList[] = $fd;
             epoll_add($fd);
         }
     }
 
     /* Nginx keeps idle upstream connections for up to 60 s and the spec asks
-     * us to hold them for at least 65 s, so only drop after 90 s of silence. */
+     * us to hold them for at least 65 s, so only drop after 90 s of silence.
+     * A bounded slice per cycle: with 110k sockets a full pass is a stall. */
     public function expire(int $now): void {
-        $dead = [];
-        foreach ($this->socks as $fd) {
-            if ($now - $this->lasts[$fd] >= 90) { $dead[] = $fd; }
+        $n = count($this->sockList);
+        if ($n == 0) { return; }
+        $budget = 2048;
+        while ($budget > 0 && $this->sweepPos < $n) {
+            $fd = $this->sockList[$this->sweepPos];
+            $this->sweepPos = $this->sweepPos + 1;
+            $budget = $budget - 1;
+            if (!isset($this->socks[$fd])) { continue; }
+            if ($now - $this->lasts[$fd] >= 90) { $this->close_fd($fd); }
         }
-        foreach ($dead as $fd) {
-            $this->close_fd($fd);
+        if ($this->sweepPos >= $n) {
+            $this->sweepPos = 0;
+            /* compact once the list is mostly tombstones */
+            if ($n > count($this->socks) * 2 + 1024) {
+                $this->sockList = [];
+                foreach ($this->socks as $fd) { $this->sockList[] = $fd; }
+            }
         }
-        arr_free($dead);
     }
 
     public function close_fd(int $fd): void {
         unset($this->socks[$fd]);
         unset($this->bufs[$fd]);
         unset($this->lasts[$fd]);
+        unset($this->out[$fd]);
+        unset($this->closing[$fd]);
         epoll_del($fd);
         stream_close($fd);
         /* room again: watch the listener */
@@ -1227,16 +1261,19 @@ class Server {
         $h = $this->hdr[$code] . $blen . ($shed
             ? "\r\nConnection: close\r\n\r\n"
             : "\r\nConnection: keep-alive\r\n\r\n");
-        if ($blen < 1024) {
-            /* small body: one write, no big copy */
-            $out = $h . $body;
-            $sent = stream_send($fd, $out);
-            if ($sent != strlen($out) || $shed) { $this->close_fd($fd); }
+        $total = strlen($h) + $blen;
+        $sent = stream_send2_nb($fd, $h, $body);
+        if ($sent < 0) { $this->close_fd($fd); return; }
+        if ($sent == $total) {
+            if ($shed) { $this->close_fd($fd); }
             return;
         }
-        /* header and body in one writev: no copy of the payload */
-        $sent = stream_send2($fd, $h, $body);
-        if ($sent != strlen($h) + $blen || $shed) { $this->close_fd($fd); }
+        $data = $h . $body;
+        /* The socket buffer is full: keep the rest and let epoll report the
+         * socket writable. Sleeping here would stall every other connection. */
+        $this->out[$fd] = substr($data, $sent);
+        if ($shed) { $this->closing[$fd] = 1; }
+        epoll_mod($fd, 3);
     }
 }
 
