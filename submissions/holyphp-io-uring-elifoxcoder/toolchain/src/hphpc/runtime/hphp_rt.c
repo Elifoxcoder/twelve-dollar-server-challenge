@@ -189,6 +189,19 @@ static hstr *hp_str_heap_new(const char *bytes, size_t len) {
     return s;
 }
 
+/* Single characters are shared, immortal strings. Loops such as base64url(),
+ * cp_len(), parse_id() and the JSON scanner index a string hundreds of times
+ * per request and must not allocate a fresh one-character string each time. */
+static _Thread_local hstr *g_chars[256];
+static hstr *hp_char_str(unsigned char c) {
+    if (!g_chars[c]) {
+        g_chars[c] = hp_str_heap_new((const char *)&c, 1);
+        g_chars[c]->flags = HP_F_STATIC;
+        g_chars[c]->rc = 0;
+    }
+    return g_chars[c];
+}
+
 /* Scoped when a scope is active, heap otherwise. */
 static hstr *hp_str_alloc(size_t len, size_t cap) {
     hstr *s;
@@ -431,8 +444,8 @@ hstr *hp_str_slice(hstr *s, int64_t start, int64_t end) {
 }
 
 hstr *hp_str_char_at(hstr *s, int64_t idx) {
-    if (!s || idx < 0 || (size_t)idx >= s->len) return hp_str_lit("");
-    return hp_str_new(s->data + idx, 1);
+    if (!s || idx < 0 || (size_t)idx >= s->len) return hp_null_str();
+    return hp_char_str((unsigned char)s->data[idx]);
 }
 
 int64_t hp_str_len(hstr *s) { return s ? (int64_t)s->len : 0; }
@@ -978,24 +991,13 @@ hval hp_arr_get(harr *a, hval idx) {
 
 /* PHP-style indexing on any value: arrays/maps index normally, strings
  * return a 1-char string, null indexes to null (like PHP 8 null["]). */
-static _Thread_local hstr *g_chars[256];
-
 hval hp_arr_get_v(hval container, hval idx) {
     if (container.tag == HV_ARR) return hp_arr_get(container.u.a, idx);
     if (container.tag == HV_STR) {
         int64_t i = hp_val_to_int(idx);
         hstr *s = container.u.s;
         if (i < 0 || !s || (size_t)i >= s->len) return hp_of_str(hp_null_str());
-        /* Single characters come from a 256-entry table: loops like
-         * base64url(), cp_len() and the JSON parser index strings hundreds
-         * of times per request and must not allocate each time. */
-        unsigned char c = (unsigned char)s->data[i];
-        if (!g_chars[c]) {
-            g_chars[c] = hp_str_heap_new((const char *)&c, 1);
-            g_chars[c]->flags = HP_F_STATIC;
-            g_chars[c]->rc = 0;
-        }
-        return hp_of_str(g_chars[c]);
+        return hp_of_str(hp_char_str((unsigned char)s->data[i]));
     }
     return hp_null;
 }

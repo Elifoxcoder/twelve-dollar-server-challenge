@@ -2036,18 +2036,24 @@ hval hpbi_stream_recv(hval s, hval maxn) {
     int64_t want = hp_val_to_int(maxn);
     if (want <= 0) want = 4096;
     if (want > (1 << 20)) want = (1 << 20);
-    char *buf = (char *)malloc((size_t)want);
-    if (!buf) return hp_of_str(hp_str_lit(""));
+    /* one reusable buffer per thread instead of a malloc/free per recv */
+    static _Thread_local char *g_rbuf = NULL;
+    static _Thread_local size_t g_rbuf_cap = 0;
+    if ((size_t)want > g_rbuf_cap) {
+        char *nb = (char *)realloc(g_rbuf, (size_t)want);
+        if (!nb) return hp_of_str(hp_null_str());
+        g_rbuf = nb;
+        g_rbuf_cap = (size_t)want;
+    }
+    char *buf = g_rbuf;
     int r = recv(fd, buf, (int)want, 0);
     bool blocked = (r < 0) && hp_sock_wouldblock();
     if (r <= 0 && !blocked)
         sockrec((intptr_t)fd, true)->eof = true;
     if (r > 0) {
         hstr *out = hp_str_new(buf, (size_t)r);
-        free(buf);
         return hp_of_str(out);
     }
-    free(buf);
     if (r == 0) {                    /* orderly shutdown by the peer */
         sockrec((intptr_t)fd, true)->eof = true;
         return hp_of_str(hp_str_lit(""));
