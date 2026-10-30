@@ -91,7 +91,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 55 | go-gnet-kaikegm | #180 | Go (gnet) | **88,000** ⁿ | 8,633 | 236 | 363 | 0.00 | 77 | 83 | 313 | 2026-10-29 |
 | 58 | archbtw-epoll-BlueFill | #200 | ArchBTW (transpiled to C, epoll) | **85,000** | 8,284 | 349 | 562 | 0.02 | 88 | 99 | 525 | 2026-10-30 |
 | 59 | rust-axum-tbsvttr | #17 | Rust (Axum) | **76,000** | 7,434 | 280 | 551 | 0.00 | 85 | 106 | 1,118 | 2026-10-26 |
-| 59 | holyphp-io-uring-elifoxcoder | #204 | HolyPHP (epoll) | **76,000** | 7,394 | 157 | 484 | 0.00 | 89 | 112 | 438 | 2026-10-30 |
+| 59 | holyphp-io-uring-elifoxcoder | #204 | HolyPHP (epoll) | **76,000** ᵘ | 7,394 | 157 | 484 | 0.00 | 89 | 112 | 438 | 2026-10-30 |
 | 61 | python-stdlib-shawal-mbalire | #118 | Python (stdlib, PGO CPython) | **75,000** | 7,327 | 342 | 514 | 0.00 | 90 | 114 | 326 | 2026-10-27 |
 | 62 | zig-iouring-marler8997 ᵖ | #125 | Zig (io_uring) | **71,000** ᶠ | 6,559 | 1.0 | 1.5 | 0.93 | 31 | 44 | 199 | 2026-10-21 |
 | 62 | typescript-deno-JakeAve | #119 | Deno | **71,000** ᶠ | 6,558 | 5.6 | 13 | 0.93 | 47 | 67 | 412 | 2026-10-21 |
@@ -196,6 +196,11 @@ flags) scored **257,000** (24,766 req/s, p95 13.5 / p99 29 ms, 0 err, 74 % CPU, 
 earlier attempt at `0ed86bf` hit the 1-hour install timeout). 270,000 passed the 2-minute probe but failed the 5-minute
 hold with 60 % errors, nearly all `connection refused` from mid-hold on (the app stopped accepting). The row above
 stays on #113's merged code until #191 is merged.
+
+ᵘ **HolyPHP #204's follow-up #213** (`96aa4f5`, SQLite B-tree reads; held, not merged: see the rule flags) scored
+**110,000** (10,637 req/s, p95 210 / p99 845 ms, 0 err, 83 % CPU, 73 µs/req, 234 MB, 2026-10-30). 115,000 and 120,000
+failed the 2-minute probe on timeouts (p99 1.7 s / 3.4 s). The row above stays on #204's merged code until #213 is
+merged.
 
 ᶠ **The 65,535 file-descriptor limit, not speed.** These twenty-one serve 65,535 keep-alive users and the rest wait in the
 listen queue until mload's 60 s timeout. Each scored run shows exactly ~21,900 timeouts = 0.93 % of requests, just under the
@@ -363,6 +368,9 @@ committed in this repo.
   reads and writes the SQLite B-tree + WAL file format directly (no libsqlite3, no -shm/locking, only 2-level page
   splits). This goes further than the B-tree-cursor entries #153/#158/#191. Scored as submitted (280k at `15e3271`;
   195k at `0e7bc24`); held open for Arjay (rules 1/2/6 question).
+- **holyphp-io-uring's follow-up #213** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors
+  (`hp_btree.c` appended to the SQLite amalgamation, like lean-derive #153; feed ordered by `id DESC`; writes use SQL).
+  Scored as submitted (110k at `96aa4f5`, footnote ᵘ); held open for Arjay (rules 2/3 question).
 - **python-pyrustapi #147 serves its reads from the `pyrustapi` package's native SQL tier** (`sql=` route options),
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
