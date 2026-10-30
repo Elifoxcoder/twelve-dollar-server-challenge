@@ -870,6 +870,7 @@ void builtins_init(void) {
     add("bt_rowid",             B_MISC, ty_int,    false, false);
     add("bt_payload_ptr",       B_MISC, ty_int,    false, false);
     add("bt_payload_size",      B_MISC, ty_int,    false, false);
+    add("bt_count_key",        B_MISC, ty_int,    false, false);
     add("sb_new",               B_MISC, ty_int,    false, false);
     add("sb_put",               B_MISC, ty_bool,   false, false);
     add("sb_bytes",             B_MISC, ty_bool,   false, false);

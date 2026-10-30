@@ -138,3 +138,66 @@ const unsigned char *hp_bt_payload_impl(void *v, int *pn) {
     *pn = (int)amt;
     return (const unsigned char *)p;
 }
+
+/* Decode the first column of an index record (serial types in the header). */
+static sqlite3_int64 hp_index_first_key(const unsigned char *p, int n, int *ok) {
+    *ok = 0;
+    if (!p || n < 2) return 0;
+    int hdr = p[0] & 0xFF;
+    if (hdr < 2 || hdr > n) return 0;
+    int st = p[1] & 0xFF;
+    int len;
+    if (st >= 1 && st <= 4) len = st;
+    else if (st == 5) len = 6;
+    else if (st == 6 || st == 7) len = 8;
+    else if (st == 8) { *ok = 1; return 0; }
+    else if (st == 9) { *ok = 1; return 1; }
+    else return 0;
+    if (hdr + len > n) return 0;
+    sqlite3_int64 v = 0;
+    for (int i = 0; i < len; i++) v = (v << 8) | (sqlite3_int64)p[hdr + i];
+    *ok = 1;
+    return v;
+}
+
+/* Count the index entries whose first key column equals `key`.
+ *
+ * Seek with (key, MAX rowid): the cursor lands on the last entry <= that
+ * key, i.e. the last entry of the key's run (or just past it when the key
+ * has no entries). Walk backwards while the first column still matches. */
+int hp_bt_count_key_impl(void *v, sqlite3_int64 key) {
+    HpBt *h = (HpBt *)v;
+    UnpackedRecord r;
+    Mem m[2];
+    int res = 0, count = 0;
+    if (!h || !h->pKey) return -1;
+
+    memset(m, 0, sizeof m);
+    m[0].flags = MEM_Int;
+    m[0].u.i = key;
+    m[1].flags = MEM_Int;
+    m[1].u.i = 0x7fffffffffffffffLL;
+    memset(&r, 0, sizeof r);
+    r.pKeyInfo = h->pKey;
+    r.nField = 2;
+    r.default_rc = 1;
+    r.aMem = m;
+
+    if (sqlite3BtreeIndexMoveto(&h->cur, &r, &res) != SQLITE_OK) return -1;
+    if (h->cur.eState != CURSOR_VALID) return 0;
+
+    for (;;) {
+        int n = 0, ok = 0;
+        const unsigned char *p = hp_bt_payload_impl(h, &n);
+        sqlite3_int64 k = hp_index_first_key(p, n, &ok);
+        if (!ok) break;
+        if (k > key) {
+            if (sqlite3BtreePrevious(&h->cur, 0) != SQLITE_OK) break;
+            continue;
+        }
+        if (k < key) break;
+        count++;
+        if (sqlite3BtreePrevious(&h->cur, 0) != SQLITE_OK) break;
+    }
+    return count;
+}

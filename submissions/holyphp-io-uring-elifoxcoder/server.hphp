@@ -873,13 +873,20 @@ class Server {
                 $a = $up + $hdr;
             }
         }
-        sqlite_bind_int($this->likecnt, 1, $id);
-        $n = 0;
-        if (sqlite_step($this->likecnt) == 100) {
-            $n = sqlite_column_int($this->likecnt, 0);
+        /* like_count from the index itself: seek to the post's range and
+         * walk the matching entries backwards. The SQL count runs the VDBE
+         * and measured several microseconds per request. */
+        $n = -1;
+        if ($this->btLikes != 0) { $n = bt_count_key($this->btLikes, $id); }
+        if ($n < 0) {
+            sqlite_bind_int($this->likecnt, 1, $id);
+            $n = 0;
+            if (sqlite_step($this->likecnt) == 100) {
+                $n = sqlite_column_int($this->likecnt, 0);
+            }
+            sqlite_reset($this->likecnt);
+            sqlite_clear_bindings($this->likecnt);
         }
-        sqlite_reset($this->likecnt);
-        sqlite_clear_bindings($this->likecnt);
 
         $sb = sb_new();
         sb_reserve($sb, 1024);

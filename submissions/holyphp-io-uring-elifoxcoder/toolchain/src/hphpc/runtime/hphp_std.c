@@ -4793,6 +4793,7 @@ HP_BT_WEAK int hp_bt_prev_impl(void *v);
 HP_BT_WEAK int hp_bt_seek_impl(void *v, int64_t r);
 HP_BT_WEAK int64_t hp_bt_rowid_impl(void *v);
 HP_BT_WEAK const unsigned char *hp_bt_payload_impl(void *v, int *pn);
+HP_BT_WEAK int hp_bt_count_key_impl(void *v, int64_t key);
 
 static void *bt_h(hval v) { return (void *)(intptr_t)hp_val_to_int(v); }
 
@@ -4827,6 +4828,10 @@ hval hpbi_bt_payload_size(hval h) {
     if (!hp_bt_payload_impl) return hp_of_int(0);
     (void)hp_bt_payload_impl(bt_h(h), &n);
     return hp_of_int(n);
+}
+hval hpbi_bt_count_key(hval h, hval key) {
+    if (!hp_bt_count_key_impl) return hp_of_int(-1);
+    return hp_of_int((int64_t)hp_bt_count_key_impl(bt_h(h), (int64_t)hp_val_to_int(key)));
 }
 
 /* ---- generic string builder ---- */

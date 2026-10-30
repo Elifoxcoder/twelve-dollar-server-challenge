@@ -1030,6 +1030,7 @@ hval hpbi_bt_seek(hval h, hval rowid);
 hval hpbi_bt_rowid(hval h);
 hval hpbi_bt_payload_ptr(hval h);
 hval hpbi_bt_payload_size(hval h);
+hval hpbi_bt_count_key(hval h, hval key);
 hval hpbi_sb_new(void);
 hval hpbi_sb_put(hval h, hval str);
 hval hpbi_sb_bytes(hval h, hval ptr, hval len);
