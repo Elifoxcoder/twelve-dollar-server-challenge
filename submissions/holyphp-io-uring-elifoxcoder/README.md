@@ -108,10 +108,10 @@ server's own CPU from `/proc`:
 
 | Endpoint | before this round | now |
 |---|---:|---:|
-| `GET /feed` (5.1 KB seed) | 32.1 µs | **19.7 µs** |
-| `GET /posts/:id` | 13.8 µs | **11.5 µs** |
-| `POST /posts/:id/like` | 83 µs | **55 µs** |
-| `POST /posts` | 83 µs | **59 µs** |
+| `GET /feed` (5.1 KB seed) | 32.1 µs | **17.9 µs** |
+| `GET /posts/:id` | 13.8 µs | **6.4 µs** |
+| `POST /posts/:id/like` | 83 µs | **54 µs** |
+| `POST /posts` | 83 µs | **62 µs** |
 
 The local proxy reads ~3.2× faster than the box, so it is useful for comparing
 builds, not for predicting the score. The steady-state feed is ~3.5 KB (the
