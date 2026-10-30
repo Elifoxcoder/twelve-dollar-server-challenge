@@ -26,7 +26,7 @@
 #define SMALL_RING         1024 /* tables this small never use multishot accept */
 #define GEN_MASK           0xffffffu
 #define SWEEP_INTERVAL_NS  10000000000LL
-#define GUARD_INTERVAL_NS  250000000LL
+#define GUARD_INTERVAL_NS  100000000LL
 #define SHED_PER_TICK      2000
 #define LISTEN_BACKLOG     4096
 
@@ -196,16 +196,25 @@ static inline uint32_t fifo_pop(struct fifo *f) {
 
 /* ------------------------------------------------------------------ sqe helpers */
 
+/* A full SQ is submitted on the spot. -EBUSY means the CQ overflowed and the
+ * kernel will not take new SQEs until the overflow is flushed; flushing needs
+ * an enter with GETEVENTS, after which the submit is retried. The loop never
+ * drops a completion: overflowed CQEs are queued by the kernel and reaped
+ * later like any other. */
 static struct io_uring_sqe *sqe_get(struct ring *rg) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&rg->r);
-    if (!sqe) {
+    for (int attempt = 0; !sqe && attempt < 8; attempt++) {
         int rc = io_uring_submit(&rg->r);
-        if (rc < 0 && rc != -EBUSY) log_msg("io_uring_submit (full sq): %s", strerror(-rc));
-        sqe = io_uring_get_sqe(&rg->r);
-        if (!sqe) {
-            log_msg("fatal: no sqe after submit");
-            abort();
+        if (rc == -EBUSY) {
+            io_uring_get_events(&rg->r);
+        } else if (rc < 0 && rc != -EAGAIN && rc != -EINTR) {
+            log_msg("io_uring_submit (full sq): %s", strerror(-rc));
         }
+        sqe = io_uring_get_sqe(&rg->r);
+    }
+    if (!sqe) {
+        log_msg("fatal: no sqe after submit");
+        abort();
     }
     return sqe;
 }
@@ -299,9 +308,14 @@ static inline uint32_t ring_free(const struct ring *rg) {
     return rg->slots - rg->used;
 }
 
+/* Ring 0 is woken for a secondary ring by a one-shot poll on that ring's fd,
+ * armed only after the ring was drained. A multishot poll would fire again
+ * on every pass while the CQ holds anything, which kept the loop from ever
+ * waiting for a batch once several rings were busy. */
 static void arm_ring_poll(struct net *n, struct ring *rg) {
+    if (rg->poll_armed) return;
     struct io_uring_sqe *sqe = sqe_get(&n->rings[0]);
-    io_uring_prep_poll_multishot(sqe, rg->r.ring_fd, POLLIN);
+    io_uring_prep_poll_add(sqe, rg->r.ring_fd, POLLIN);
     sqe->user_data = ud(OP_RINGPOLL, 0, rg->idx);
     rg->poll_armed = 1;
 }
@@ -783,10 +797,7 @@ static void handle_cqe(struct net *n, struct ring *rg, struct io_uring_cqe *cqe)
     case OP_RINGPOLL: {
         struct ring *other = &n->rings[ud_idx(cqe->user_data)];
         other->needs_reap = 1;
-        if (!(cqe->flags & IORING_CQE_F_MORE)) {
-            other->poll_armed = 0;
-            arm_ring_poll(n, other);
-        }
+        other->poll_armed = 0; /* re-armed by reap() once the ring is drained */
         break;
     }
     case OP_CANCEL: break; /* the cancelled accept's own completion drives update_accept */
@@ -800,7 +811,7 @@ static void handle_cqe(struct net *n, struct ring *rg, struct io_uring_cqe *cqe)
 }
 
 static void reap(struct net *n, struct ring *rg) {
-    if (rg->idx != 0 && !io_uring_cq_ready(&rg->r)) io_uring_get_events(&rg->r);
+    if (rg->idx != 0 && rg->needs_reap && !io_uring_cq_ready(&rg->r)) io_uring_get_events(&rg->r);
     struct io_uring_cqe *cqe;
     unsigned head, count = 0;
     io_uring_for_each_cqe(&rg->r, head, cqe) {
@@ -811,6 +822,7 @@ static void reap(struct net *n, struct ring *rg) {
     n->st.cqes += count;
     n->last_cqes += count;
     rg->needs_reap = 0;
+    if (rg->idx != 0 && !io_uring_cq_ready(&rg->r)) arm_ring_poll(n, rg);
 }
 
 /* ------------------------------------------------------------------ periodic work */
@@ -920,19 +932,19 @@ static void sweep_partials(struct net *n) {
 }
 
 static void print_stats(struct net *n) {
-    static uint64_t last_req, last_cpu_us;
+    static uint64_t last_req, last_cpu_us, last_usr_us;
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
-    uint64_t cpu_us = (uint64_t)ru.ru_utime.tv_sec * 1000000 + (uint64_t)ru.ru_utime.tv_usec +
-                      (uint64_t)ru.ru_stime.tv_sec * 1000000 + (uint64_t)ru.ru_stime.tv_usec;
-    uint64_t dreq = n->st.requests - last_req, dcpu = cpu_us - last_cpu_us;
+    uint64_t usr_us = (uint64_t)ru.ru_utime.tv_sec * 1000000 + (uint64_t)ru.ru_utime.tv_usec;
+    uint64_t cpu_us = usr_us + (uint64_t)ru.ru_stime.tv_sec * 1000000 + (uint64_t)ru.ru_stime.tv_usec;
+    uint64_t dreq = n->st.requests - last_req, dcpu = cpu_us - last_cpu_us, dusr = usr_us - last_usr_us;
     struct db_stats ds;
     struct app_stats as;
     db_get_stats(n->db, &ds);
     app_get_stats(n->app, &as);
     uint32_t held_now = fifo_len(&n->held);
     log_msg(
-        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f (total %.1f) rss=%ld MB avail=%llu MB iters=%llu "
+        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f (usr %.1f sys %.1f, total %.1f) rss=%ld MB avail=%llu MB iters=%llu "
         "wakeups=%llu "
         "cqes=%llu enobufs=%llu rearms=%llu short=%llu senderr=%llu bad=%llu big=%llu shed=%llu "
         "accerr=%llu chunks_free=%u held=%u wal=%u ckpts=%llu ckpt_avg_ms=%.1f ckpt_max_ms=%.1f holds=%llu "
@@ -940,7 +952,8 @@ static void print_stats(struct net *n) {
         "feed=%llu post=%llu like=%llu create=%llu health=%llu 2xx=%llu 4xx=%llu 5xx=%llu "
         "iter_max_ms=%.1f iters_over_20ms=%llu batch_max=%u batch_max_ms=%.1f endbatch_max_ms=%.1f",
         n->open_conns, (unsigned long long)n->st.max_open, (unsigned long long)n->st.requests, (unsigned long long)dreq,
-        dreq ? (double)dcpu / (double)dreq : 0.0, n->st.requests ? (double)cpu_us / (double)n->st.requests : 0.0,
+        dreq ? (double)dcpu / (double)dreq : 0.0, dreq ? (double)dusr / (double)dreq : 0.0,
+        dreq ? (double)(dcpu - dusr) / (double)dreq : 0.0, n->st.requests ? (double)cpu_us / (double)n->st.requests : 0.0,
         ru.ru_maxrss / 1024, (unsigned long long)available_mb(n), (unsigned long long)n->st.iterations,
         (unsigned long long)n->st.wakeups, (unsigned long long)n->st.cqes, (unsigned long long)n->st.enobufs,
         (unsigned long long)n->st.rearms, (unsigned long long)n->st.short_sends, (unsigned long long)n->st.send_errors,
@@ -960,6 +973,7 @@ static void print_stats(struct net *n) {
     n->st.batch_max = 0;
     last_req = n->st.requests;
     last_cpu_us = cpu_us;
+    last_usr_us = usr_us;
 }
 
 /* ------------------------------------------------------------------ setup */
@@ -1029,6 +1043,10 @@ static int ring_init(struct net *n, struct ring *rg, uint32_t idx) {
          IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL, 0},
     };
     const unsigned *flags = flag_sets[idx == 0 ? 0 : 1];
+    /* 16,384 CQEs: ring memory counts against RLIMIT_MEMLOCK (8 MB for a
+     * systemd service), about 0.5 MB per ring at these sizes, so seven rings
+     * fit with room to spare. A CQ overflow is not fatal: the kernel queues
+     * the surplus and sqe_get() flushes it (see there). */
     int rc = -EINVAL;
     for (size_t i = 0; i < 3 && rc < 0; i++) {
         struct io_uring_params p = {.flags = flags[i] | IORING_SETUP_CQSIZE, .cq_entries = 16384};
@@ -1036,7 +1054,7 @@ static int ring_init(struct net *n, struct ring *rg, uint32_t idx) {
         if (rc == 0 && i) log_msg("ring %u: fallback setup flags 0x%x", idx, flags[i]);
     }
     if (rc < 0) {
-        log_msg("io_uring_queue_init: %s", strerror(-rc));
+        log_msg("ring %u: io_uring_queue_init(sq 4096, cq 16384): %s", idx, strerror(-rc));
         return -1;
     }
     rc = io_uring_register_ring_fd(&rg->r);
@@ -1254,11 +1272,11 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
             }
         }
 
-        /* Wait for a batch of completions, or not at all when work is pending. */
+        /* Wait for a batch of completions. Only requests already queued skip
+         * the wait; completions sitting in a ring's CQ do not, so that passes
+         * are paced by the batch window rather than by whichever ring posted
+         * last (each pass costs an enter per ring and a transaction pair). */
         int pending = !fifo_empty(&n->ready);
-        for (uint32_t i = 0; i < n->nrings && !pending; i++) {
-            if (io_uring_cq_ready(&n->rings[i].r)) pending = 1;
-        }
         unsigned wait_nr;
         struct __kernel_timespec ts;
         if (pending) {
@@ -1284,9 +1302,7 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
 
         int64_t t_iter = now_ns();
         reap(n, r0);
-        for (uint32_t i = 1; i < n->nrings; i++) {
-            if (n->rings[i].needs_reap || io_uring_cq_ready(&n->rings[i].r)) reap(n, &n->rings[i]);
-        }
+        for (uint32_t i = 1; i < n->nrings; i++) reap(n, &n->rings[i]);
         n->st.iterations++;
 
         if (!fifo_empty(&n->ready)) {
@@ -1303,7 +1319,6 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
             if (i && io_uring_sq_ready(&rg->r)) {
                 rc = io_uring_submit(&rg->r);
                 if (rc < 0 && rc != -EBUSY) log_msg("submit ring %u: %s", i, strerror(-rc));
-                if (io_uring_cq_ready(&rg->r)) rg->needs_reap = 1;
             }
         }
         int64_t d_iter = now_ns() - t_iter;
