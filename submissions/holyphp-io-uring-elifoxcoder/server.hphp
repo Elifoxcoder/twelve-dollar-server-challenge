@@ -287,6 +287,9 @@ class Server {
     /* ready list, kept between rounds so a round allocates no array */
     pub array $ready = [];
 
+    /* response header prefixes per status code, built once */
+    pub array $hdr = [];
+
     pub int $feed = 0;
     pub int $post = 0;
     pub int $health = 0;
@@ -397,6 +400,15 @@ class Server {
         }
         $this->srv = intval($srv);
         epoll_add($this->srv);
+
+        $codes = [200, 201, 400, 401, 404, 500, 503];
+        $texts = ["OK", "Created", "Bad Request", "Unauthorized",
+                  "Not Found", "Internal Server Error", "Service Unavailable"];
+        for ($i = 0; $i < 7; $i++) {
+            $this->hdr[$codes[$i]] = "HTTP/1.1 " . $codes[$i] . " " . $texts[$i]
+                . "\r\nContent-Type: application/json\r\nContent-Encoding: identity"
+                . "\r\nContent-Length: ";
+        }
         $this->start = time();
         $this->sweep = $this->start;
         return true;
@@ -482,12 +494,17 @@ class Server {
         /* $this->bufs[$fd] is "" (static) or a heap copy of a partial
          * request; the concatenation lives in the request scope and is
          * either consumed here or copied back with str_persist(). */
-        $old = $this->bufs[$fd];
-        $buf = $old . $chunk;
-        str_free($old);              /* no-op for the interned "" */
-        $this->bufs[$fd] = "";
         $this->lasts[$fd] = time();
-        $this->parse($fd, $buf);
+        $old = $this->bufs[$fd];
+        if ($old == "") {
+            /* the common case: a whole request in one recv, no copy at all */
+            $this->parse($fd, $chunk);
+        } else {
+            $buf = $old . $chunk;
+            str_free($old);
+            $this->bufs[$fd] = "";
+            $this->parse($fd, $buf);
+        }
     }
 
     public function parse(int $fd, string $in): void {
@@ -699,46 +716,122 @@ class Server {
         $tok = trim(substr($hdr, 7));
         if ($tok == "") { return [1]; }
 
-        $parts = explode(".", $tok);
-        if (count($parts) != 3) { arr_free($parts); return [2]; }
+        /* split into header.payload.signature without building an array */
+        $p1 = strpos($tok, ".");
+        if ($p1 === false) { return [2]; }
+        $p2 = strpos($tok, ".", $p1 + 1);
+        if ($p2 === false) { return [2]; }
+        if (strpos($tok, ".", $p2 + 1) !== false) { return [2]; }
 
-        $h = json_decode($this->b64url($parts[0]));
-        if (!is_array($h) || !isset($h["alg"]) || $h["alg"] != "HS256") { arr_free($h); arr_free($parts); return [2]; }
-        arr_free($h);
+        $h64 = substr($tok, 0, $p1);
+        $p64 = substr($tok, $p1 + 1, $p2 - $p1 - 1);
+        $s64 = substr($tok, $p2 + 1);
 
-        $sig = $this->b64url($parts[2]);
-        $mac = hash_hmac("sha256", $parts[0] . "." . $parts[1], $this->secret, true);
-        if (!hash_equals($mac, $sig)) { arr_free($parts); return [2]; }
+        /* the header is a flat object: read "alg" directly instead of
+         * decoding it into an array */
+        if ($this->json_str($this->b64url($h64), "alg") != "HS256") { return [2]; }
 
-        $p = json_decode($this->b64url($parts[1]));
-        if (!is_array($p)) { arr_free($p); arr_free($parts); return [2]; }
-        if (!isset($p["exp"])) { arr_free($p); arr_free($parts); return [2]; }
-        if (intval($p["exp"]) < time()) { arr_free($p); arr_free($parts); return [2]; }
+        $sig = $this->b64url($s64);
+        $mac = hash_hmac("sha256", $h64 . "." . $p64, $this->secret, true);
+        if (!hash_equals($mac, $sig)) { return [2]; }
 
-        if (!isset($p["sub"]) || !is_string($p["sub"])) { arr_free($p); arr_free($parts); return [3]; }
-        $uid = $this->parse_id($p["sub"]);
-        if ($uid <= 0) { arr_free($p); arr_free($parts); return [3]; }
+        /* same for the payload */
+        $pj = $this->b64url($p64);
+        $exp = $this->json_num($pj, "exp");
+        if ($exp < 0) { return [2]; }
+        if ($exp < time()) { return [2]; }
 
-        if (!isset($p["username"]) || !is_string($p["username"]) || $p["username"] == "") { arr_free($p); arr_free($parts); return [3]; }
-        $name = $p["username"];
-        arr_free($p);
-        arr_free($parts);
+        $sub = $this->json_str($pj, "sub");
+        if ($sub == "") { return [3]; }
+        $uid = $this->parse_id($sub);
+        if ($uid <= 0) { return [3]; }
+
+        $name = $this->json_str($pj, "username");
+        if ($name == "") { return [3]; }
         return [0, $uid, $name];
     }
 
-    public function b64url(string $s): string {
-        $n = strlen($s);
-        $out = "";
-        for ($i = 0; $i < $n; $i++) {
-            $ch = $s[$i];
-            if ($ch == "-") { $out .= "+"; }
-            else if ($ch == "_") { $out .= "/"; }
-            else { $out .= $ch; }
+    /* string value of "key" in a flat JSON object, "" when absent or not a
+     * string. Saves decoding a whole object into an array per request. */
+    public function json_str(string $j, string $key): string {
+        $n = strlen($j);
+        $k = "\"" . $key . "\"";
+        $p = strpos($j, $k);
+        if ($p === false) { return ""; }
+        $i = intval($p) + strlen($k);
+        while ($i < $n && $j[$i] != ":") {
+            $c = $j[$i];
+            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { return ""; }
+            $i++;
         }
-        $r = strlen($out) % 4;
-        if ($r == 2) { $out .= "=="; }
-        else if ($r == 3) { $out .= "="; }
-        return base64_decode($out);
+        if ($i >= $n) { return ""; }
+        $i++;
+        while ($i < $n && $j[$i] != "\"") {
+            $c = $j[$i];
+            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { return ""; }
+            $i++;
+        }
+        if ($i >= $n) { return ""; }
+        $i++;
+        $out = "";
+        while ($i < $n) {
+            $c = $j[$i];
+            if ($c == "\"") { return $out; }
+            if ($c == chr(92)) {
+                $i++;
+                if ($i >= $n) { return ""; }
+                $out .= $j[$i];
+            } else {
+                $out .= $c;
+            }
+            $i++;
+        }
+        return "";
+    }
+
+    /* integer value of "key", -1 when absent or not a number */
+    public function json_num(string $j, string $key) {
+        $n = strlen($j);
+        $k = "\"" . $key . "\"";
+        $p = strpos($j, $k);
+        if ($p === false) { return -1; }
+        $i = intval($p) + strlen($k);
+        while ($i < $n && $j[$i] != ":") {
+            $c = $j[$i];
+            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { return -1; }
+            $i++;
+        }
+        if ($i >= $n) { return -1; }
+        $i++;
+        while ($i < $n) {
+            $c = $j[$i];
+            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { break; }
+            $i++;
+        }
+        $neg = false;
+        if ($i < $n && $j[$i] == "-") { $neg = true; $i++; }
+        $v = 0;
+        $digits = 0;
+        while ($i < $n) {
+            $c = $j[$i];
+            if ($c < "0" || $c > "9") { break; }
+            $v = $v * 10 + (ord($c) - 48);
+            $digits++;
+            $i++;
+        }
+        if ($digits == 0) { return -1; }
+        return $neg ? -$v : $v;
+    }
+
+    public function b64url(string $s): string {
+        /* two whole-string replacements instead of rebuilding the token one
+         * character at a time */
+        $t = str_replace("-", "+", $s);
+        $t = str_replace("_", "/", $t);
+        $r = strlen($t) % 4;
+        if ($r == 2) { $t .= "=="; }
+        else if ($r == 3) { $t .= "="; }
+        return base64_decode($t);
     }
 
     public function parse_id($s) {
@@ -858,25 +951,16 @@ class Server {
     }
 
     public function write_response(int $fd, int $code, string $body): void {
-        $st = "OK";
-        if ($code == 201) { $st = "Created"; }
-        else if ($code == 400) { $st = "Bad Request"; }
-        else if ($code == 401) { $st = "Unauthorized"; }
-        else if ($code == 404) { $st = "Not Found"; }
-        else if ($code == 500) { $st = "Internal Server Error"; }
-        else if ($code == 503) { $st = "Service Unavailable"; }
-
         /* Direct mode holds one fd per user. Keep a reserve below the box's
          * 65535 LimitNOFILE: above the threshold the response asks the client
          * to reconnect, so new users are never refused. */
         $shed = count($this->socks) >= 58000;
         $blen = strlen($body);
-        /* Content-Encoding: identity tells the front proxy the body is already
-         * in its final form, so Nginx skips its gzip pass. On a 1-vCPU box that
-         * pass costs about as much CPU as the whole app; the responses are
-         * small and the box has bandwidth to spare. Compression is optional
-         * per SPEC.md. */
-        $h = "HTTP/1.1 " . $code . " " . $st . "\r\nContent-Type: application/json\r\nContent-Encoding: identity\r\nContent-Length: " . $blen . "\r\nConnection: " . ($shed ? "close" : "keep-alive") . "\r\n\r\n";
+        /* The status line and the fixed headers are prebuilt per code, so a
+         * response costs three concatenations instead of ten. */
+        $h = $this->hdr[$code] . $blen . ($shed
+            ? "\r\nConnection: close\r\n\r\n"
+            : "\r\nConnection: keep-alive\r\n\r\n");
         if ($blen < 1024) {
             /* small body: one write, no big copy */
             $out = $h . $body;
