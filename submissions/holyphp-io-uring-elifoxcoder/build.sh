@@ -39,9 +39,10 @@ if command -v unzip >/dev/null 2>&1 \
    && curl -fsSL -o "$BUILD/$SQLITE_ZIP" "$SQLITE_URL" 2>/dev/null \
    && echo "$SQLITE_SHA  $BUILD/$SQLITE_ZIP" | sha256sum -c - >/dev/null 2>&1 \
    && unzip -q -o "$BUILD/$SQLITE_ZIP" -d "$BUILD/sqlite-src" >/dev/null 2>&1 \
+   && cat "$BUILD/sqlite-src/sqlite-amalgamation-$SQLITE_VER/sqlite3.c" \
+          "$ROOT/src/hp_btree.c" > "$SQLITE_DIR/sqlite3_all.c" \
    && "$CC" -O2 -fno-strict-aliasing -std=c11 -DSQLITE_THREADSAFE=0 \
-            -c "$BUILD/sqlite-src/sqlite-amalgamation-$SQLITE_VER/sqlite3.c" \
-            -o "$SQLITE_DIR/sqlite3.o"; then
+            -c "$SQLITE_DIR/sqlite3_all.c" -o "$SQLITE_DIR/sqlite3.o"; then
   ar rcs "$SQLITE_DIR/libsqlite3.a" "$SQLITE_DIR/sqlite3.o"
   export CPATH="$BUILD/sqlite-src/sqlite-amalgamation-$SQLITE_VER${CPATH:+:$CPATH}"
   export HPHP_SQLITE_LIB="$SQLITE_DIR/libsqlite3.a"

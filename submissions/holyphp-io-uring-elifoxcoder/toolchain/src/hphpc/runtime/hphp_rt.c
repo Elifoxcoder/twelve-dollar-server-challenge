@@ -70,6 +70,7 @@ static void hbuf_grow(Buf *b, size_t need) {
     b->cap = ncap;
 }
 
+void hbuf_reserve(Buf *b, size_t n) { hbuf_grow(b, n); }
 void hbuf_putc(Buf *b, char c) { hbuf_grow(b, 1); b->data[b->len++] = c; b->data[b->len] = 0; }
 
 void hbuf_write(Buf *b, const char *s, size_t n) {

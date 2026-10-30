@@ -853,6 +853,26 @@ void builtins_init(void) {
     add("live_allocs",          B_MISC, ty_int,    false, false);
     add("arr_clear",            B_MISC, ty_bool,   false, false);
     add("arr_free",             B_MISC, ty_bool,   false, false);
+    add("bt_root",              B_MISC, ty_int,    false, false);
+    add("bt_open",              B_MISC, ty_int,    false, false);
+    add("bt_close",             B_MISC, ty_bool,   false, false);
+    add("bt_first",             B_MISC, ty_int,    false, false);
+    add("bt_last",              B_MISC, ty_int,    false, false);
+    add("bt_next",              B_MISC, ty_int,    false, false);
+    add("bt_prev",              B_MISC, ty_int,    false, false);
+    add("bt_seek",              B_MISC, ty_int,    false, false);
+    add("bt_rowid",             B_MISC, ty_int,    false, false);
+    add("bt_payload_ptr",       B_MISC, ty_int,    false, false);
+    add("bt_payload_size",      B_MISC, ty_int,    false, false);
+    add("sb_new",               B_MISC, ty_int,    false, false);
+    add("sb_put",               B_MISC, ty_bool,   false, false);
+    add("sb_bytes",             B_MISC, ty_bool,   false, false);
+    add("sb_int",               B_MISC, ty_bool,   false, false);
+    add("sb_json",              B_MISC, ty_bool,   false, false);
+    add("sb_json_str",          B_MISC, ty_bool,   false, false);
+    add("str_from_bytes",       B_MISC, ty_string, false, false);
+    add("sb_reserve",           B_MISC, ty_bool,   false, false);
+    add("sb_take",              B_MISC, ty_string, false, false);
     add("sqlite_open",          B_MISC, ty_int,    false, false);  /* (path) -> handle|0 */
     add("sqlite_close",         B_MISC, ty_bool,   false, false);
     add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */
