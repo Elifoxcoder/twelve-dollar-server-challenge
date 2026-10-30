@@ -1056,6 +1056,27 @@ hval hpbi_sqlite_last_insert_rowid(hval db);
 hval hpbi_sqlite_errmsg(hval db);
 hval hpbi_sqlite_busy_timeout(hval db, hval ms);
 
+/* ---- typed builtin fast paths (see hphp_std.c) ---- */
+int64_t hp_sb_new_t(void);
+bool hp_sb_reserve_t(int64_t h, int64_t n);
+bool hp_sb_put_t(int64_t h, hstr *s);
+bool hp_sb_int_t(int64_t h, int64_t n);
+bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len);
+bool hp_sb_json_str_t(int64_t h, hstr *s);
+hstr *hp_sb_take_t(int64_t h);
+int64_t hp_bt_last_t(int64_t h);
+int64_t hp_bt_first_t(int64_t h);
+int64_t hp_bt_prev_t(int64_t h);
+int64_t hp_bt_next_t(int64_t h);
+int64_t hp_bt_seek_t(int64_t h, int64_t rowid);
+int64_t hp_bt_rowid_t(int64_t h);
+int64_t hp_bt_payload_ptr_t(int64_t h);
+int64_t hp_bt_payload_size_t(int64_t h);
+int64_t hp_stream_send_nb_t(int64_t fd, hstr *s);
+int64_t hp_stream_send2_nb_t(int64_t fd, hstr *a, hstr *b);
+bool hp_epoll_mod_t(int64_t fd, int64_t mask);
+int64_t hp_nofile_limit_t(void);
+
 #ifdef __cplusplus
 }
 #endif

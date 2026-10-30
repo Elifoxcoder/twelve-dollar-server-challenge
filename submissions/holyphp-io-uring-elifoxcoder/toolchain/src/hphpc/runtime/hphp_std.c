@@ -5061,3 +5061,128 @@ hval hpbi_sqlite_busy_timeout(hval dbv, hval ms) {
     if (!db) return hp_of_bool(false);
     return hp_of_bool(sqlite3_busy_timeout(db, (int)hp_val_to_int(ms)) == SQLITE_OK);
 }
+
+/* ---------------- typed builtin fast paths ----------------
+ * The codegen calls these instead of the hval ABI when every argument has a
+ * statically known type. Both sides then skip boxing: no hp_of_* on the way
+ * in, no hp_val_to_* on the way out. They are plain C functions, so a
+ * program that never hits the fast path is unaffected. */
+
+int64_t hp_sb_new_t(void) {
+    HpSb *s = (HpSb *)hp_alloc(sizeof *s);
+    hbuf_init(&s->b);
+    return (int64_t)(intptr_t)s;
+}
+bool hp_sb_reserve_t(int64_t h, int64_t n) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    if (n > 0) hbuf_reserve(&s->b, (size_t)n);
+    return true;
+}
+bool hp_sb_put_t(int64_t h, hstr *x) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    hbuf_write(&s->b, x->data, x->len);
+    return true;
+}
+bool hp_sb_int_t(int64_t h, int64_t n) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    char tmp[24];
+    int i = 24;
+    unsigned long long u = n < 0 ? -(unsigned long long)n : (unsigned long long)n;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
+    if (n < 0) tmp[--i] = '-';
+    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    return true;
+}
+bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    const unsigned char *p = (const unsigned char *)(intptr_t)ptr;
+    if (p && len > 0) sb_json_esc(&s->b, p, (size_t)len);
+    else hbuf_puts(&s->b, "\"\"");
+    return true;
+}
+bool hp_sb_json_str_t(int64_t h, hstr *x) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    sb_json_esc(&s->b, (const unsigned char *)x->data, x->len);
+    return true;
+}
+hstr *hp_sb_take_t(int64_t h) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    char *p = hbuf_take(&s->b);
+    hstr *r = hp_str_new(p, strlen(p));
+    free(p);
+    free(s);
+    return r;
+}
+int64_t hp_bt_last_t(int64_t h) { return hp_bt_last_impl ? hp_bt_last_impl((void *)(intptr_t)h) : -1; }
+int64_t hp_bt_first_t(int64_t h) { return hp_bt_first_impl ? hp_bt_first_impl((void *)(intptr_t)h) : -1; }
+int64_t hp_bt_prev_t(int64_t h) { return hp_bt_prev_impl ? hp_bt_prev_impl((void *)(intptr_t)h) : 0; }
+int64_t hp_bt_next_t(int64_t h) { return hp_bt_next_impl ? hp_bt_next_impl((void *)(intptr_t)h) : 0; }
+int64_t hp_bt_seek_t(int64_t h, int64_t rowid) {
+    return hp_bt_seek_impl ? hp_bt_seek_impl((void *)(intptr_t)h, (sqlite3_int64)rowid) : -1;
+}
+int64_t hp_bt_rowid_t(int64_t h) {
+    return hp_bt_rowid_impl ? (int64_t)hp_bt_rowid_impl((void *)(intptr_t)h) : -1;
+}
+int64_t hp_bt_payload_ptr_t(int64_t h) {
+    int n = 0;
+    const unsigned char *p;
+    if (!hp_bt_payload_impl) return 0;
+    p = hp_bt_payload_impl((void *)(intptr_t)h, &n);
+    return (int64_t)(intptr_t)p;
+}
+int64_t hp_bt_payload_size_t(int64_t h) {
+    int n = 0;
+    if (!hp_bt_payload_impl) return 0;
+    (void)hp_bt_payload_impl((void *)(intptr_t)h, &n);
+    return n;
+}
+int64_t hp_stream_send_nb_t(int64_t fd, hstr *d) {
+    if (d->len == 0) return 0;
+    int r = (int)send((hp_sock)fd, d->data, (int)d->len, 0);
+    if (r >= 0) return r;
+    if (hp_sock_wouldblock()) return -1;
+    return -2;
+}
+int64_t hp_stream_send2_nb_t(int64_t fd, hstr *x, hstr *y) {
+#if defined(_WIN32)
+    size_t n = x->len + y->len;
+    char *tmp = malloc(n ? n : 1);
+    if (!tmp) return -2;
+    memcpy(tmp, x->data, x->len);
+    memcpy(tmp + x->len, y->data, y->len);
+    int r = (int)send((hp_sock)fd, tmp, (int)n, 0);
+    free(tmp);
+    if (r >= 0) return r;
+    return hp_sock_wouldblock() ? -1 : -2;
+#else
+    struct iovec iov[2];
+    iov[0].iov_base = x->data;
+    iov[0].iov_len = x->len;
+    iov[1].iov_base = y->data;
+    iov[1].iov_len = y->len;
+    ssize_t r = writev((hp_sock)fd, iov, 2);
+    if (r >= 0) return (int64_t)r;
+    return hp_sock_wouldblock() ? -1 : -2;
+#endif
+}
+bool hp_epoll_mod_t(int64_t fd, int64_t mask) {
+#if !defined(_WIN32)
+    if (fd < 0 || g_epfd < 0) return false;
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    if (mask & 1) ev.events |= EPOLLIN;
+    if (mask & 2) ev.events |= EPOLLOUT;
+    ev.data.fd = (int)fd;
+    if (epoll_ctl(g_epfd, EPOLL_CTL_MOD, (int)fd, &ev) != 0) return false;
+#endif
+    return true;
+}
+int64_t hp_nofile_limit_t(void) {
+#if defined(_WIN32)
+    return 0;
+#else
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return 0;
+    return (int64_t)rl.rlim_cur;
+#endif
+}

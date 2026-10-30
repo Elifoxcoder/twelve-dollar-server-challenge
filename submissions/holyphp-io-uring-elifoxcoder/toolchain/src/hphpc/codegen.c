@@ -1159,6 +1159,58 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
         project_hval(dst, ret);
         return;
     }
+    /* Typed fast path: when every argument has the static type the builtin
+     * expects, call the raw-typed variant and skip hval boxing on both
+     * sides. Falls through to the hval ABI for anything else. */
+    {
+        static const struct { const char *name; const char *params; char ret; } T[] = {
+            {"sb_new",           "",    'i'},
+            {"sb_reserve",       "ii",  'b'},
+            {"sb_put",           "is",  'b'},
+            {"sb_int",           "ii",  'b'},
+            {"sb_json",          "iii", 'b'},
+            {"sb_json_str",      "is",  'b'},
+            {"sb_take",          "i",   's'},
+            {"bt_last",          "i",   'i'},
+            {"bt_first",         "i",   'i'},
+            {"bt_prev",          "i",   'i'},
+            {"bt_next",          "i",   'i'},
+            {"bt_seek",          "ii",  'i'},
+            {"bt_rowid",         "i",   'i'},
+            {"bt_payload_ptr",   "i",   'i'},
+            {"bt_payload_size",  "i",   'i'},
+            {"stream_send_nb",   "is",  'i'},
+            {"stream_send2_nb",  "iss", 'i'},
+            {"epoll_mod",        "ii",  'b'},
+            {"nofile_limit",     "",    'i'},
+        };
+        for (size_t k = 0; k < sizeof T / sizeof T[0]; k++) {
+            if (strcmp(name, T[k].name) != 0) continue;
+            if (strlen(T[k].params) != args.len) break;
+            bool ok = true;
+            for (size_t i = 0; i < args.len; i++) {
+                const Type *at = ((Expr *)args.items[i])->type;
+                char want = T[k].params[i];
+                if (!at) { ok = false; break; }
+                if (want == 'i') { if (!type_is_integral(at->kind)) { ok = false; break; } }
+                else if (want == 's') { if (at->kind != TY_STRING) { ok = false; break; } }
+                else { ok = false; break; }
+            }
+            if (!ok) break;
+            if (!ret) break;
+            bool ret_ok = (T[k].ret == 'i' && type_is_integral(ret->kind)) ||
+                          (T[k].ret == 's' && ret->kind == TY_STRING) ||
+                          (T[k].ret == 'b' && ret->kind == TY_BOOL);
+            if (!ret_ok) break;
+            buf_printf(dst, "hp_%s_t(", name);
+            for (size_t i = 0; i < args.len; i++) {
+                if (i) buf_puts(dst, ", ");
+                emit_expr(g, args.items[i], dst);
+            }
+            buf_puts(dst, ")");
+            return;
+        }
+    }
     const char *cname = name;   /* emitted C name (aliases below) */
     if (strcmp(name, "date") == 0) cname = "date2";
     else if (strcmp(name, "json_encode") == 0) cname = "json_encode2";
