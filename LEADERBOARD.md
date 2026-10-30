@@ -317,7 +317,8 @@ committed in this repo.
   install hit its 1-hour timeout (exit 124), so the app never built (1/42 tests). Not patched. Re-run at `e872f75`
   (2026-10-30), which drops `make` and stops at `v2` (`vc/v.c` → `v1` → `v1 -no-parallel -gc none cmd/v`): no OOM kill
   and the box stayed up, but it was still compiling when the install hit the 1-hour timeout again (exit 124), so
-  `/opt/twelve-v/v` was never installed (1/42 tests).
+  `/opt/twelve-v/v` was never installed (1/42 tests). Third try at `f120d65` (2026-10-30, V/vc fetched from upstream
+  vlang by pinned commit, same `v1` → `v2` bootstrap): the install hit the 1-hour timeout again (exit 124), 1/42 tests.
 - **Rust #178 — build failed** (`6aa144b`): `install.sh` installs Rust with rustup into root's `~/.cargo`, but
   `build.sh` runs as the `deploy` user, which has no `cargo` (exit 127), so the app never built (1/42 tests). CI passed
   because GitHub's runner has Rust preinstalled. Not patched.
