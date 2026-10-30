@@ -820,11 +820,21 @@ class Server {
         else if ($code == 500) { $st = "Internal Server Error"; }
         else if ($code == 503) { $st = "Service Unavailable"; }
 
-        $h = "HTTP/1.1 " . $code . " " . $st . "\r\nContent-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\nConnection: keep-alive\r\n\r\n";
+        $blen = strlen($body);
+        $h = "HTTP/1.1 " . $code . " " . $st . "\r\nContent-Type: application/json\r\nContent-Length: " . $blen . "\r\nConnection: keep-alive\r\n\r\n";
+        if ($blen < 1024) {
+            /* small body: one write, no big copy */
+            $out = $h . $body;
+            $sent = stream_send($fd, $out);
+            if ($sent != strlen($out)) { $this->close_fd($fd); }
+            return;
+        }
+        /* big body (/feed): write header and body separately so the 5 KB
+         * payload is not copied through one more string */
         $sent = stream_send($fd, $h);
         if ($sent != strlen($h)) { $this->close_fd($fd); return; }
         $sent2 = stream_send($fd, $body);
-        if ($sent2 != strlen($body)) { $this->close_fd($fd); }
+        if ($sent2 != $blen) { $this->close_fd($fd); }
     }
 }
 
