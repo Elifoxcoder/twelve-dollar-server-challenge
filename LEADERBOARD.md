@@ -169,9 +169,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 136 | php-symfony-gnugat | #136 | PHP (Symfony, FrankenPHP) | **15,500** | 1,521 | 174 | 425 | 0.00 | 97 | 592 | 952 | 2026-10-30 |
 | 137 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
 | 138 | kotlin-ktor-graalvm-noamm9 | #53 | Kotlin (Ktor, GraalVM native) | **10,500** | 1,027 | 356 | 906 | 0.00 | 79 | 715 | 314 | 2026-10-26 |
-| 139 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
-| 139 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
-| 141 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
+| 139 | java-jdkhttpserver-razorree | #209 | Java (JDK HttpServer, virtual threads) | **9,500** ᵉ | 935 | 0.8 | 53 | 0.91 | 20 | 199 | 1,025 | 2026-10-30 |
+| 140 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
+| 140 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
+| 142 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 | — | goose-native-tbsvttr | #143 | Goose (native) | **failed** (install OOM) | | | | | | | | 2026-10-28 |
@@ -258,6 +259,10 @@ resets), all on POSTs: 13 % of likes and 11 % of new posts failed, 0 reads. They
 at 25k, 3.4 % at 30k, 5.5 % at 40k) while CPU stays at 39–63 %. Same pattern as Lua #126 and Crystal Kemal #194, which
 also run behind Nginx.
 
+ᵉ **JDK HttpServer #209's errors are dropped writes at 20 % CPU.** The 0.91 % in its scored hold are EOFs (3,071), all
+on POSTs: 12 % of likes and 11 % of new posts failed, 0 reads. They start well below CPU saturation (0.53 % at 9k,
+1.06 % at 10k, 3.9 % at 20k) while CPU stays at 20–42 %, so the write path, not CPU, is the limit.
+
 ᵏ **Go net/http #129 is memory-bound.** At 45,000 it was clean at 67 % CPU (303 ms p99), but its cgroup peaked at 1.5 GB.
 At 47k/48k/50k/60k/80k it was OOM-killed during the ramp (kernel log) and most later connections were refused (54–93 %
 errors, 6–36 % CPU).
@@ -325,7 +330,7 @@ committed in this repo.
 - **Tokens without `exp` accepted** (SPEC requires rejecting them): java-nio #88, quarkus #67 (SmallRye
   grace), kotlin #83, scala #107, node-uws #102, dart #46, go-champ3oy #76, pypy #84 (deliberately), bash #89,
   go-gnet #38, kotlin-ktor #36, python-fastapi-granian #41, go-stdlib #44, kotlin-ktor-C-Hatton #45, typescript-fastify #51, go-epoll-damianoneill #52,
-  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, holyphp-io-uring #204 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
+  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, holyphp-io-uring #204, java-jdkhttpserver #209 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
 - **Kotlin Ktor #36 (and #53, based on it) commit `gradle/wrapper/gradle-wrapper.jar`**. Arjay ruled (2026-10-26) that
   the standard Gradle wrapper jar is fine and not a prebuilt binary under rule 10. Kotlin Ktor #36 also returned a few HTTP 500s on writes under load (1–5 per probe,
   0 in the scored hold); its StatusPages handler doesn't log the exception. kotlin-springboot #66 commits the same
