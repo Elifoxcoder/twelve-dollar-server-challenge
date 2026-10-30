@@ -315,8 +315,10 @@ class Server {
         sqlite_exec($db, "PRAGMA foreign_keys=OFF");
 
         /* The response bodies are rendered by SQLite's JSON1 functions, in
-         * the exact key order the spec wants; ORDER BY inside the aggregate
-         * needs SQLite >= 3.44 (Ubuntu 24.04 ships 3.45). */
+         * the exact key order the spec wants. The feed's ordering comes from
+         * the input subquery; json_group_array appends rows in that order, so
+         * no second sort inside the aggregate is needed.
+         * (INSERT ... RETURNING needs SQLite >= 3.35; Ubuntu 24.04 has 3.45.) */
         $q = "SELECT '{' || '\"posts\":' || json_group_array(json_object("
            . "'id', p.id, 'body', p.body, 'created_at', p.created_at, "
            . "'author', p.author, "

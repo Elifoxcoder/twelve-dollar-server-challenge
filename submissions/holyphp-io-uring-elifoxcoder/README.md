@@ -31,7 +31,7 @@ There is no challenge-specific C code and no `io_uring`; the `-luring` link depe
 
 ## Requirements
 
-- SQLite ≥ 3.44 (for `ORDER BY` inside `json_group_array`'s input and JSON1). Ubuntu 24.04 ships 3.45.
+- SQLite ≥ 3.38 (JSON1 built in; `INSERT … RETURNING` needs ≥ 3.35). Ubuntu 24.04 ships 3.45.
 - `libsqlite3-dev`, `build-essential`.
 
 ## Run
