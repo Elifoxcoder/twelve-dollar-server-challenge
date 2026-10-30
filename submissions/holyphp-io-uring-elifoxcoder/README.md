@@ -98,23 +98,25 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 
 ## Measurements
 
-On a VPS shaped like the box (1 vCPU AMD EPYC Rome, 2 GB, Ubuntu 26.04), with
-the mixed k6 request model (feed → post → 15 % like, 2 % post), four runs, load
-generator on the same machine so the server's own CPU time is what is measured:
+**On the challenge box** (benchmark agent, direct on :80, 5-minute hold): the
+B-tree build (`96aa4f5`) held **110,000 users**, up from 76,000 for the previous
+submission — 10,637 req/s, 73 µs/request at 83 % CPU, p95 210 ms, 0 errors.
+That is the number that counts; the local figures below are a proxy.
 
-| Mode | req/s at saturation | CPU/request | Errors |
-|---|---:|---:|---:|
-| **direct, steady state** | **26,832** | **34.3 µs** | 0 |
-| behind Nginx | 15,684 | 60.7 µs (app 31.5 + proxy 29.2) | 0 |
+On a VPS shaped like the box (1 vCPU, 2 GB), fresh seed, `wrk`, measuring the
+server's own CPU from `/proc`:
 
-At the k6 model's 0.096 req/s per user, 26,832 req/s at 92 % of one core is
-**~279,500 users** (four consecutive runs on the final build: 277,800–285,900).
-(The feed in the steady state is ~3.5 KB, not the 5.1 KB of the golden seed:
-after a few seconds the twenty newest posts are the ones the load test created.
-Measuring against a fresh database overstates the cost.)
+| Endpoint | before this round | now |
+|---|---:|---:|
+| `GET /feed` (5.1 KB seed) | 32.1 µs | **19.7 µs** |
+| `GET /posts/:id` | 13.8 µs | **11.5 µs** |
+| `POST /posts/:id/like` | 83 µs | **55 µs** |
+| `POST /posts` | 83 µs | **59 µs** |
 
-The Nginx row is from the earlier SQL-only build; the B-tree rows were measured
-in direct mode only.
+The local proxy reads ~3.2× faster than the box, so it is useful for comparing
+builds, not for predicting the score. The steady-state feed is ~3.5 KB (the
+twenty newest posts are the ones the load test created), smaller than the 5.1 KB
+golden seed.
 
-`bash test/run.sh submissions/holyphp-io-uring-elifoxcoder` → `passed=42 failed=0`
-(also verified behind Nginx in the container, on SQLite 3.45).
+`bash test/test.sh` → `passed=42 failed=0`, also on the box and in a 1 vCPU /
+2 GB KVM VM (Ubuntu 24.04).
