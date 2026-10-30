@@ -284,6 +284,10 @@ class Server {
     /* deferred writes for the current poll cycle */
     pub array $pending = [];
 
+    /* poll set, kept between rounds so a round allocates no array */
+    pub array $handles = [];
+    pub array $ready = [];
+
     pub int $feed = 0;
     pub int $post = 0;
     pub int $health = 0;
@@ -381,6 +385,7 @@ class Server {
             return false;
         }
         $this->srv = intval($srv);
+        $this->handles = [$this->srv];
         $this->start = time();
         $this->sweep = $this->start;
         return true;
@@ -390,11 +395,12 @@ class Server {
 
     public function run(): void {
         while (true) {
-            $handles = [$this->srv];
-            foreach ($this->socks as $s) { $handles[] = $s; }
+            /* Everything allocated while serving this poll cycle is released
+             * by scope_end(): no per-request malloc survives the round. */
+            scope_begin();
 
-            $ready = stream_ready($handles, 50);
-            foreach ($ready as $h) {
+            stream_ready_into($this->ready, $this->handles, 50);
+            foreach ($this->ready as $h) {
                 $fd = intval($h);
                 if ($fd == $this->srv) {
                     $this->accept_all();
@@ -409,6 +415,8 @@ class Server {
                 $this->sweep = $now;
                 $this->expire($now);
             }
+
+            scope_end();
         }
     }
 
@@ -422,6 +430,7 @@ class Server {
             $this->socks[$fd] = $fd;
             $this->bufs[$fd] = "";
             $this->lasts[$fd] = time();
+            $this->handles[] = $fd;
         }
     }
 
@@ -435,6 +444,7 @@ class Server {
         foreach ($dead as $fd) {
             $this->close_fd($fd);
         }
+        arr_free($dead);
     }
 
     public function close_fd(int $fd): void {
@@ -442,6 +452,11 @@ class Server {
         unset($this->bufs[$fd]);
         unset($this->lasts[$fd]);
         stream_close($fd);
+        /* drop the fd from the poll set; connections close rarely, so a
+         * rebuild is cheaper than an O(n) splice on every request */
+        arr_clear($this->handles);
+        $this->handles[] = $this->srv;
+        foreach ($this->socks as $s) { $this->handles[] = $s; }
     }
 
     /* -------------------------------------------------------- read side */
@@ -452,21 +467,30 @@ class Server {
             if (stream_eof($fd)) { $this->close_fd($fd); }
             return;
         }
-        $b = $this->bufs[$fd];
-        $b .= $chunk;
-        $this->bufs[$fd] = $b;
+        /* $this->bufs[$fd] is "" (static) or a heap copy of a partial
+         * request; the concatenation lives in the request scope and is
+         * either consumed here or copied back with str_persist(). */
+        $old = $this->bufs[$fd];
+        $buf = $old . $chunk;
+        str_free($old);              /* no-op for the interned "" */
+        $this->bufs[$fd] = "";
         $this->lasts[$fd] = time();
-        $this->parse($fd);
+        $this->parse($fd, $buf);
     }
 
-    public function parse(int $fd): void {
-        $buf = $this->bufs[$fd];
+    public function parse(int $fd, string $in): void {
+        $buf = $in;
         while (true) {
             $he = strpos($buf, "\r\n\r\n");
             if ($he === false) {
                 if (strlen($buf) > 131072) {
-                    $this->bufs[$fd] = "";
                     $this->close_fd($fd);
+                    return;
+                }
+                if (strlen($buf) == 0) {
+                    $this->bufs[$fd] = "";
+                } else {
+                    $this->bufs[$fd] = str_persist($buf);
                 }
                 return;
             }
@@ -475,9 +499,9 @@ class Server {
             if ($le === false) { $le = strlen($head); }
             $line = substr($head, 0, $le);
             $sp1 = strpos($line, " ");
-            if ($sp1 === false) { $this->bufs[$fd] = ""; $this->close_fd($fd); return; }
+            if ($sp1 === false) { $this->close_fd($fd); return; }
             $sp2 = strpos($line, " ", $sp1 + 1);
-            if ($sp2 === false) { $this->bufs[$fd] = ""; $this->close_fd($fd); return; }
+            if ($sp2 === false) { $this->close_fd($fd); return; }
             $method = substr($line, 0, $sp1);
             $path = substr($line, $sp1 + 1, $sp2 - $sp1 - 1);
 
@@ -499,20 +523,18 @@ class Server {
                 }
             }
             if ($cl < 0 || $cl > 1048576) {
-                $this->bufs[$fd] = "";
                 $this->close_fd($fd);
                 return;
             }
 
             $start = $he + 4;
             if (strlen($buf) - $start < $cl) {
-                $this->bufs[$fd] = $buf;
+                $this->bufs[$fd] = str_persist($buf);
                 return;
             }
             $body = "";
             if ($cl > 0) { $body = substr($buf, $start, $cl); }
             $buf = substr($buf, $start + $cl);
-            $this->bufs[$fd] = $buf;
 
             $this->dispatch($fd, $method, $path, $auth, $body);
             if (!isset($this->socks[$fd])) { return; }
@@ -579,21 +601,24 @@ class Server {
         $rc = sqlite_step($this->health);
         if ($rc == 100) {
             sqlite_reset($this->health);
-            $b = sprintf('{"status":"ok","db":"ok","uptime_s":%d}', time() - $this->start);
+            $b = '{"status":"ok","db":"ok","uptime_s":' . (time() - $this->start) . '}';
             $this->send_json($fd, 200, $b);
         } else {
             $e = sqlite_errmsg($this->db);
             sqlite_reset($this->health);
-            $b = sprintf('{"status":"degraded","db":"unreachable","error":%s}', json_encode($e));
+            $b = '{"status":"degraded","db":"unreachable","error":' . json_encode($e) . '}';
             $this->send_json($fd, 503, $b);
         }
     }
 
     public function on_create(int $fd, string $auth, string $body): void {
         $a = $this->authenticate($auth);
-        if ($a[0] == 1) { $this->send_json($fd, 401, '{"error":"missing bearer token"}'); return; }
-        if ($a[0] == 2) { $this->send_json($fd, 401, '{"error":"invalid or expired token"}'); return; }
-        if ($a[0] == 3) { $this->send_json($fd, 401, '{"error":"invalid token payload"}'); return; }
+        if ($a[0] == 1) { arr_free($a); $this->send_json($fd, 401, '{"error":"missing bearer token"}'); return; }
+        if ($a[0] == 2) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid or expired token"}'); return; }
+        if ($a[0] == 3) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid token payload"}'); return; }
+        $uid = $a[1];
+        $uname = $a[2];
+        arr_free($a);
 
         $j = new Json($body);
         if (!$j->parse()) {
@@ -602,10 +627,12 @@ class Server {
         }
         $v = $j->root;
         if (!is_array($v) || !isset($v["body"]) || !is_string($v["body"])) {
+            arr_free($v);
             $this->send_json($fd, 400, '{"error":"body is required"}');
             return;
         }
         $text = trim($v["body"]);
+        arr_free($v);
         if ($text == "") {
             $this->send_json($fd, 400, '{"error":"body is required"}');
             return;
@@ -619,18 +646,20 @@ class Server {
         $r["fd"] = $fd;
         $r["code"] = 0;
         $r["body"] = "";
-        $r["uid"] = $a[1];
+        $r["uid"] = $uid;
         $r["pid"] = 0;
         $r["text"] = $text;
-        $r["name"] = $a[2];
+        $r["name"] = $uname;
         $this->pending[] = $r;
     }
 
     public function on_like(int $fd, string $auth, string $ids): void {
         $a = $this->authenticate($auth);
-        if ($a[0] == 1) { $this->send_json($fd, 401, '{"error":"missing bearer token"}'); return; }
-        if ($a[0] == 2) { $this->send_json($fd, 401, '{"error":"invalid or expired token"}'); return; }
-        if ($a[0] == 3) { $this->send_json($fd, 401, '{"error":"invalid token payload"}'); return; }
+        if ($a[0] == 1) { arr_free($a); $this->send_json($fd, 401, '{"error":"missing bearer token"}'); return; }
+        if ($a[0] == 2) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid or expired token"}'); return; }
+        if ($a[0] == 3) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid token payload"}'); return; }
+        $uid = $a[1];
+        arr_free($a);
 
         $id = $this->parse_id($ids);
         if ($id <= 0) {
@@ -642,7 +671,7 @@ class Server {
         $r["fd"] = $fd;
         $r["code"] = 0;
         $r["body"] = "";
-        $r["uid"] = $a[1];
+        $r["uid"] = $uid;
         $r["pid"] = $id;
         $r["text"] = "";
         $r["name"] = "";
@@ -659,26 +688,30 @@ class Server {
         if ($tok == "") { return [1]; }
 
         $parts = explode(".", $tok);
-        if (count($parts) != 3) { return [2]; }
+        if (count($parts) != 3) { arr_free($parts); return [2]; }
 
         $h = json_decode($this->b64url($parts[0]));
-        if (!is_array($h) || !isset($h["alg"]) || $h["alg"] != "HS256") { return [2]; }
+        if (!is_array($h) || !isset($h["alg"]) || $h["alg"] != "HS256") { arr_free($h); arr_free($parts); return [2]; }
+        arr_free($h);
 
         $sig = $this->b64url($parts[2]);
         $mac = hash_hmac("sha256", $parts[0] . "." . $parts[1], $this->secret, true);
-        if (!hash_equals($mac, $sig)) { return [2]; }
+        if (!hash_equals($mac, $sig)) { arr_free($parts); return [2]; }
 
         $p = json_decode($this->b64url($parts[1]));
-        if (!is_array($p)) { return [2]; }
-        if (!isset($p["exp"])) { return [2]; }
-        if (intval($p["exp"]) < time()) { return [2]; }
+        if (!is_array($p)) { arr_free($p); arr_free($parts); return [2]; }
+        if (!isset($p["exp"])) { arr_free($p); arr_free($parts); return [2]; }
+        if (intval($p["exp"]) < time()) { arr_free($p); arr_free($parts); return [2]; }
 
-        if (!isset($p["sub"]) || !is_string($p["sub"])) { return [3]; }
+        if (!isset($p["sub"]) || !is_string($p["sub"])) { arr_free($p); arr_free($parts); return [3]; }
         $uid = $this->parse_id($p["sub"]);
-        if ($uid <= 0) { return [3]; }
+        if ($uid <= 0) { arr_free($p); arr_free($parts); return [3]; }
 
-        if (!isset($p["username"]) || !is_string($p["username"]) || $p["username"] == "") { return [3]; }
-        return [0, $uid, $p["username"]];
+        if (!isset($p["username"]) || !is_string($p["username"]) || $p["username"] == "") { arr_free($p); arr_free($parts); return [3]; }
+        $name = $p["username"];
+        arr_free($p);
+        arr_free($parts);
+        return [0, $uid, $name];
     }
 
     public function b64url(string $s): string {
@@ -801,8 +834,9 @@ class Server {
     public function flush(): void {
         foreach ($this->pending as $r) {
             $this->write_response($r["fd"], $r["code"], $r["body"]);
+            arr_free($r);
         }
-        $this->pending = [];
+        arr_clear($this->pending);
     }
 
     /* ------------------------------------------------------ send side */

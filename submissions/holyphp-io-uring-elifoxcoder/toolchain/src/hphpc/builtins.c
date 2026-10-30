@@ -281,6 +281,7 @@ void builtins_init(void) {
     add("stream_set_blocking",  B_MISC, ty_bool,   false, false);
     add("stream_set_nodelay",   B_MISC, ty_bool,   false, false);
     add("stream_ready",         B_MISC, type_array_of(ty_mixed), false, false);
+    add("stream_ready_into",    B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_recv",          B_MISC, ty_string, false, false);
     add("stream_send",          B_MISC, ty_int,    false, false);
     add("stream_eof",           B_MISC, ty_bool,   false, false);
@@ -841,6 +842,14 @@ void builtins_init(void) {
     add("heap_dump",     B_MISC,    ty_string, true,  false);
 
     /* generic SQLite binding */
+    add("scope_begin",          B_MISC, ty_bool,   false, false);
+    add("scope_end",            B_MISC, ty_bool,   false, false);
+    add("str_persist",          B_MISC, ty_string, false, false);
+    add("str_free",             B_MISC, ty_bool,   false, false);
+    add("live_bytes",           B_MISC, ty_int,    false, false);
+    add("live_allocs",          B_MISC, ty_int,    false, false);
+    add("arr_clear",            B_MISC, ty_bool,   false, false);
+    add("arr_free",             B_MISC, ty_bool,   false, false);
     add("sqlite_open",          B_MISC, ty_int,    false, false);  /* (path) -> handle|0 */
     add("sqlite_close",         B_MISC, ty_bool,   false, false);
     add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */

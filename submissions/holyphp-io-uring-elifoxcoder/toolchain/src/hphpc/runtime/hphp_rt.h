@@ -48,15 +48,27 @@ typedef struct hclosure hclosure;
 typedef struct hval hval;
 
 /* ---------- strings: length-prefixed, refcounted ---------- */
+/* hstr flags */
+#define HP_F_STATIC 1u  /* interned literal: lives in the literal table forever */
+#define HP_F_SCOPED 2u  /* owned by the current request scope: freed by hp_scope_end */
+
 struct hstr {
     size_t len;         /* byte length (PHP-style byte strings) */
-    size_t cap;         /* allocated bytes incl. NUL; >= len+1, 0 for literals */
+    size_t cap;         /* allocated bytes incl. NUL; >= len+1 */
     uint32_t hash;      /* 0 = not computed */
     uint32_t rc;
+    uint32_t flags;     /* HP_F_STATIC / HP_F_SCOPED */
     char data[];        /* NUL-terminated for C interop */
 };
 
 hstr *hp_str_lit(const char *cstr);
+hstr *hp_str_intern(const char *cstr);   /* cached literal, rc == 0 */
+/* Request scope: strings allocated between begin/end are released in one
+ * shot by hp_scope_end(). Values that must outlive the scope are copied out
+ * with hp_str_persist(). */
+void hp_scope_begin(void);
+void hp_scope_end(void);
+hstr *hp_str_persist(hstr *s);
 hstr *hp_str_new(const char *bytes, size_t len);
 hstr *hp_str_copy(hstr *s);
 void hp_str_free(hstr *s);
@@ -302,6 +314,8 @@ struct hobj {
 };
 
 void *hp_alloc(size_t n);
+int64_t hp_live_allocs(void);   /* diagnostic: live hp_alloc blocks */
+int64_t hp_live_bytes(void);    /* diagnostic: glibc in-use heap bytes */
 void hp_echo(hval v);              /* PHP echo: print value */
 
 /* ---------- builtin function entry points (hphp_std.c) ---------- */
@@ -388,6 +402,7 @@ hval hpbi_stream_set_nodelay(hval s);
 hval hpbi_stream_recv(hval s, hval max);
 hval hpbi_stream_send(hval s, hval data);
 hval hpbi_stream_ready(hval handles, hval timeout_ms);
+hval hpbi_stream_ready_into(hval out, hval handles, hval timeout_ms);
 hval hpbi_stream_eof(hval s);
 hval hpbi_stream_peer(hval s);
 hval hpbi_stream_close(hval s);
@@ -944,6 +959,14 @@ hval hpbi_proc_get_status(hval h);
 hval hpbi_proc_kill(hval h);
 
 /* generic SQLite binding (hphp_std.c): open/prepare/bind/step/column */
+hval hpbi_scope_begin(void);
+hval hpbi_scope_end(void);
+hval hpbi_str_persist(hval s);
+hval hpbi_str_free(hval s);
+hval hpbi_live_bytes(void);
+hval hpbi_live_allocs(void);
+hval hpbi_arr_clear(hval a);
+hval hpbi_arr_free(hval a);
 hval hpbi_sqlite_open(hval path);
 hval hpbi_sqlite_close(hval db);
 hval hpbi_sqlite_exec(hval db, hval sql);

@@ -19,6 +19,9 @@
  * (HP_THREAD_QUAL comes from hphp_rt.h) */
 #include "hphp_rt.h"
 #include <stdlib.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -26,8 +29,20 @@
 #include <time.h>
 
 /* ---------------- allocation ---------------- */
+static _Thread_local int64_t g_live_allocs = 0;
+int64_t hp_live_allocs(void) { return g_live_allocs; }
+int64_t hp_live_bytes(void) {
+#if defined(__GLIBC__)
+    struct mallinfo2 mi = mallinfo2();
+    return (int64_t)mi.uordblks;
+#else
+    return 0;
+#endif
+}
+
 void *hp_alloc(size_t n) {
     void *p = calloc(1, n ? n : 1);
+    g_live_allocs++;
     if (!p) {
         fprintf(stderr, "Fatal error: Allowed memory size exhausted\n");
         exit(255);
@@ -90,13 +105,75 @@ char *hbuf_take(Buf *b) {
 }
 
 /* ---------------- strings ---------------- */
-hstr *hp_str_new(const char *bytes, size_t len) {
+
+/* Request scope. A server loop wraps one poll cycle in hp_scope_begin() /
+ * hp_scope_end(); every string allocated in between is released in one shot
+ * when the cycle ends, instead of leaking one allocation per builtin call.
+ * Values that must survive the cycle are copied out with hp_str_persist().
+ * Outside a scope nothing changes: allocations are plain heap blocks. */
+typedef struct hp_arena_blk { struct hp_arena_blk *next; } hp_arena_blk;
+static _Thread_local hp_arena_blk *g_arena_head = NULL;
+static _Thread_local int g_scope_depth = 0;
+
+void hp_scope_begin(void) { g_scope_depth++; }
+
+void hp_scope_end(void) {
+    if (g_scope_depth == 0) return;
+    if (--g_scope_depth > 0) return;
+    hp_arena_blk *b = g_arena_head;
+    while (b) {
+        hp_arena_blk *n = b->next;
+        free(b);
+        g_live_allocs--;
+        b = n;
+    }
+    g_arena_head = NULL;
+}
+
+/* Always heap, never scoped: for interned literals and the shared empty
+ * string, which outlive every scope. */
+static hstr *hp_str_heap_new(const char *bytes, size_t len) {
     size_t cap = len + 1;
     hstr *s = hp_alloc(sizeof(hstr) + cap);
     s->len = len;
     s->cap = cap;
     s->hash = 0;
     s->rc = 1;
+    s->flags = 0;
+    if (bytes && len) memcpy(s->data, bytes, len);
+    s->data[len] = 0;
+    return s;
+}
+
+/* Scoped when a scope is active, heap otherwise. */
+static hstr *hp_str_alloc(size_t len, size_t cap) {
+    hstr *s;
+    if (g_scope_depth > 0) {
+        hp_arena_blk *b = (hp_arena_blk *)malloc(sizeof(hp_arena_blk) + sizeof(hstr) + cap);
+        if (!b) {
+            fprintf(stderr, "Fatal error: Allowed memory size exhausted\n");
+            exit(255);
+        }
+        b->next = g_arena_head;
+        g_arena_head = b;
+        g_live_allocs++;
+        s = (hstr *)(b + 1);
+        memset(s, 0, sizeof(hstr));
+        s->flags = HP_F_SCOPED;
+        s->rc = 1;
+    } else {
+        s = hp_alloc(sizeof(hstr) + cap);
+        s->flags = 0;
+        s->rc = 1;
+    }
+    s->len = len;
+    s->cap = cap;
+    s->data[len] = 0;
+    return s;
+}
+
+hstr *hp_str_new(const char *bytes, size_t len) {
+    hstr *s = hp_str_alloc(len, len + 1);
     if (bytes && len) memcpy(s->data, bytes, len);
     s->data[len] = 0;
     return s;
@@ -106,11 +183,59 @@ hstr *hp_str_lit(const char *cstr) {
     return hp_str_new(cstr, strlen(cstr));
 }
 
+/* Interned literals. Codegen emits hp_str_intern("...") for string literals:
+ * the argument is the address of a C string constant, so it is stable for the
+ * whole process. Evaluating the same literal a million times (a hot loop, a
+ * server request) then costs one cache probe instead of one allocation +
+ * strlen + memcpy. Interned strings carry HP_F_STATIC and are never freed.
+ * The table is thread-local, so threads never race on it. */
+#define HP_LIT_SLOTS 1024
+typedef struct { const char *key; hstr *val; } hp_lit_ent;
+static _Thread_local hp_lit_ent hp_lit_tab[HP_LIT_SLOTS];
+
+hstr *hp_str_intern(const char *cstr) {
+    uintptr_t h = (uintptr_t)cstr;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 29;
+    size_t i = (size_t)h & (HP_LIT_SLOTS - 1);
+    for (size_t probe = 0; probe < 32; probe++) {
+        hp_lit_ent *e = &hp_lit_tab[(i + probe) & (HP_LIT_SLOTS - 1)];
+        if (e->key == cstr) return e->val;
+        if (!e->key) {
+            hstr *s = hp_str_heap_new(cstr, strlen(cstr));
+            s->flags = HP_F_STATIC;
+            s->rc = 0;
+            e->key = cstr;
+            e->val = s;
+            return s;
+        }
+    }
+    hstr *s = hp_str_heap_new(cstr, strlen(cstr));
+    s->flags = HP_F_STATIC;
+    s->rc = 0;
+    return s;
+}
+
 hstr *hp_str_copy(hstr *s) {
     return hp_str_new(s ? s->data : "", s ? s->len : 0);
 }
 
-void hp_str_free(hstr *s) { free(s); }
+/* Copy a scoped string out of the request scope (no-op for heap/static). */
+hstr *hp_str_persist(hstr *s) {
+    if (!s) return hp_null_str();
+    if (!(s->flags & HP_F_SCOPED)) return s;
+    hstr *r = hp_str_heap_new(s->data, s->len);
+    r->hash = s->hash;
+    return r;
+}
+
+/* Free a heap string. Static literals and scoped strings are owned by the
+ * literal table / the scope and are never freed here. */
+void hp_str_free(hstr *s) {
+    if (!s) return;
+    if (s->flags & (HP_F_STATIC | HP_F_SCOPED)) return;
+    free(s);
+    g_live_allocs--;
+}
 
 uint32_t hp_str_hash(hstr *s) {
     if (!s) return 0;
@@ -189,11 +314,7 @@ hstr *hp_str_concat2(hstr *a, hstr *b) {
     if (a->rc == 1) {
         cap = len * 2 + 16;
     }
-    hstr *s = hp_alloc(sizeof(hstr) + cap);
-    s->len = len;
-    s->cap = cap;
-    s->hash = 0;
-    s->rc = 1;
+    hstr *s = hp_str_alloc(len, cap);
     memcpy(s->data, a->data, a->len);
     memcpy(s->data + a->len, b->data, b->len);
     s->data[len] = 0;
@@ -222,11 +343,7 @@ hstr *hp_str_join_v(hval a, hval b) {
     if (!l) l = hp_str_lit("");
     if (!r) r = hp_str_lit("");
     size_t len = l->len + r->len;
-    hstr *s = hp_alloc(sizeof(hstr) + len + 1);
-    s->len = len;
-    s->cap = len + 1;
-    s->hash = 0;
-    s->rc = 1;
+    hstr *s = hp_str_alloc(len, len + 1);
     memcpy(s->data, l->data, l->len);
     memcpy(s->data + l->len, r->data, r->len);
     s->data[len] = 0;
@@ -366,10 +483,7 @@ hstr *hp_str_tolower(hstr *s) {
 hstr *hp_str_repeat(hstr *s, int64_t n) {
     if (!s || n <= 0) return hp_str_lit("");
     size_t len = s->len * (size_t)n;
-    hstr *r = hp_alloc(sizeof(hstr) + len + 1);
-    r->len = len;
-    r->cap = len + 1;
-    r->rc = 1;
+    hstr *r = hp_str_alloc(len, len + 1);
     for (int64_t i = 0; i < n; i++) memcpy(r->data + i * s->len, s->data, s->len);
     r->data[len] = 0;
     return r;
@@ -429,7 +543,11 @@ hval hp_of_ptr(void *p) { hval v = { HV_OBJ, { .p = p } }; return v; }
 
 hstr *hp_null_str(void) {
     static hstr *ns = NULL;
-    if (!ns) ns = hp_str_lit("");
+    if (!ns) {
+        ns = hp_str_heap_new("", 0);
+        ns->flags = HP_F_STATIC;   /* shared forever, never freed */
+        ns->rc = 0;
+    }
     return ns;
 }
 
@@ -1006,6 +1124,7 @@ void hp_arr_free(harr *a) {
     free(a->keys);
     free(a->index);
     free(a);
+    g_live_allocs--;
 }
 
 /* COW: the runtime shares arrays on assignment; writes go through

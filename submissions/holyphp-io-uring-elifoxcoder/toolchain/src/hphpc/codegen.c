@@ -542,7 +542,7 @@ static void emit_c_string(const char *s, size_t n, Buf *dst) {
 
 static void emit_str_lit(const char *s, Buf *dst) {
     size_t n = strlen(s);
-    buf_puts(dst, "hp_str_lit(");
+    buf_puts(dst, "hp_str_intern(");
     emit_c_string(s, n, dst);
     buf_puts(dst, ")");
 }
@@ -1141,7 +1141,7 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
         to_hval(g, args.items[0], dst);
         buf_puts(dst, ", ");
         to_hval(g, args.items[1], dst);
-        buf_puts(dst, ", hp_of_str(hp_str_lit(\" \")))");
+        buf_puts(dst, ", hp_of_str(hp_str_intern(\" \")))");
         project_hval(dst, ret);
         return;
     }
@@ -2024,13 +2024,25 @@ static void emit_assign(Codegen *g, Expr *e, Buf *dst) {
             const Type *vt = e->u.assign.value->type;
             bool is_arr_v = vt && (vt->kind == TY_ARRAY || vt->kind == TY_VEC ||
                                    vt->kind == TY_MAP || vt->kind == TY_SET);
+            /* An array literal already produces a fresh array that nothing
+             * else can alias, so cloning it again is a wasted allocation
+             * (and a leak: nothing frees the intermediate). */
+            bool fresh_arr = e->u.assign.value->kind == EX_ARRAY_LIT ||
+                             e->u.assign.value->kind == EX_MAP_LIT ||
+                             e->u.assign.value->kind == EX_TUPLE_LIT;
             if (tgt_is_box && is_arr_v) {
                 /* the slot is an hval but the value is a bare harr*: box it */
-                buf_printf(dst, "(%s = hp_of_arr(hp_arr_clone(%s)))",
-                           name, buf_take(&v));
+                if (fresh_arr)
+                    buf_printf(dst, "(%s = hp_of_arr(%s))", name, buf_take(&v));
+                else
+                    buf_printf(dst, "(%s = hp_of_arr(hp_arr_clone(%s)))",
+                               name, buf_take(&v));
             }
             else if (!tgt_is_box && is_arr_v) {
-                buf_printf(dst, "(%s = hp_arr_clone(%s))", name, buf_take(&v));
+                if (fresh_arr)
+                    buf_printf(dst, "(%s = %s)", name, buf_take(&v));
+                else
+                    buf_printf(dst, "(%s = hp_arr_clone(%s))", name, buf_take(&v));
             }
             else {
                 free(v.data);
@@ -2291,7 +2303,7 @@ static void emit_cast(Codegen *g, Expr *e, Buf *dst) {
     if (to->kind == TY_STRING && from && type_is_numeric(from->kind)) {
         buf_printf(dst, "hp_str_from_num(%s)", os);
     } else if (to->kind == TY_STRING && from && from->kind == TY_BOOL) {
-        buf_printf(dst, "(%s ? hp_str_lit(\"true\") : hp_str_lit(\"false\"))", os);
+        buf_printf(dst, "(%s ? hp_str_intern(\"true\") : hp_str_intern(\"false\"))", os);
     } else if (type_is_integral(to->kind) && from && from->kind == TY_STRING) {
         buf_printf(dst, "hp_str_to_int(%s)", os);
     } else if ((to->kind == TY_FLOAT || to->kind == TY_F32 || to->kind == TY_F64) &&
@@ -2343,8 +2355,8 @@ static void emit_expr(Codegen *g, Expr *e, Buf *dst) {
             else if (e->u.var.name == s_php_round_half_down) buf_puts(dst, "(int64_t)1");
             else if (e->u.var.name == s_php_round_half_even) buf_puts(dst, "(int64_t)2");
             else if (e->u.var.name == s_php_round_half_odd) buf_puts(dst, "(int64_t)3");
-            else if (e->u.var.name == s_php_os) buf_puts(dst, "hp_str_lit(\"Windows\")");
-            else if (e->u.var.name == s_php_eol) buf_puts(dst, "hp_str_lit(\"\\r\\n\")");
+            else if (e->u.var.name == s_php_os) buf_puts(dst, "hp_str_intern(\"Windows\")");
+            else if (e->u.var.name == s_php_eol) buf_puts(dst, "hp_str_intern(\"\\r\\n\")");
             else if (e->u.var.name == s_php_version) buf_puts(dst, "hpbi_phpversion()");
             else if (e->u.var.name == s_php_sapi) buf_puts(dst, "hpbi_php_sapi_name()");
             else if (e->u.var.name == s_php_uname) buf_puts(dst, "hpbi_php_uname()");
@@ -2406,7 +2418,7 @@ static void emit_expr(Codegen *g, Expr *e, Buf *dst) {
                     buf_printf(dst, "hp_of_str(hp_val_to_str(%s))", buf_take(&m));
                     free(m.data);
                 } else {
-                    buf_puts(dst, "hp_of_str(hp_str_lit(\"\"))");
+                    buf_puts(dst, "hp_of_str(hp_str_intern(\"\"))");
                 }
             } else {
                 buf_puts(dst, "hp_null");

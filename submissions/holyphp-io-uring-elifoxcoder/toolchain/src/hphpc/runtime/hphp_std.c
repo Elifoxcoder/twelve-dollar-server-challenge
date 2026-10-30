@@ -2066,6 +2066,70 @@ hval hpbi_stream_send(hval s, hval data) {
     return hp_of_int((int64_t)sent);
 }
 
+/* Shared poll body: fills `out` with the ready handles. The pollfd array is
+ * kept between calls so a busy loop does not malloc per round. */
+static void hp_poll_into(harr *out, harr *handles, int to) {
+    static _Thread_local struct pollfd *fds = NULL;
+    static _Thread_local size_t fdscap = 0;
+    if (!handles) return;
+    int64_t n = hp_arr_len(handles);
+    if (n <= 0) return;
+    if ((size_t)n > fdscap) {
+        size_t ncap = (size_t)n < 64 ? 64 : (size_t)n;
+        struct pollfd *nf = (struct pollfd *)realloc(fds, ncap * sizeof *nf);
+        if (!nf) return;
+        fds = nf;
+        fdscap = ncap;
+    }
+    int64_t nvalid = 0;
+    for (int64_t i = 0; i < n; i++) {
+        hval item = hp_arr_get(handles, hp_of_int(i));
+        hp_sock fd = sock_of(item);
+        if (fd == HP_SOCK_BAD) continue;
+        fds[nvalid].fd = fd;
+        fds[nvalid].events = POLLIN;
+        fds[nvalid].revents = 0;
+        nvalid++;
+    }
+    if (nvalid == 0) return;
+    int r;
+#ifdef _WIN32
+    r = WSAPoll(fds, (ULONG)nvalid, to);
+#else
+    r = poll(fds, (nfds_t)nvalid, to);
+#endif
+    if (r <= 0) return;
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i++) {
+        hval item = hp_arr_get(handles, hp_of_int(i));
+        hp_sock fd = sock_of(item);
+        if (fd == HP_SOCK_BAD) continue;
+        short rev = (short)fds[k++].revents;
+        if (!rev) continue;
+        /* POLLHUP often arrives with POLLIN when the peer writes and closes;
+         * stream_recv stays the single authority for EOF (recv()==0). */
+        if (rev & (POLLIN | POLLERR | POLLHUP))
+            hp_arr_push(out, item);
+    }
+}
+
+/* stream_ready_into($out, $handles, $timeoutMs): like stream_ready, but
+ * reuses the caller's array. A server loop that polls every round then
+ * allocates nothing at all here. */
+hval hpbi_stream_ready_into(hval outv, hval handles, hval timeout_ms) {
+    hp_net_init();
+    harr *out = (outv.tag == HV_ARR) ? outv.u.a : NULL;
+    if (!out) return hp_of_arr(hp_arr_new());
+    out->len = 0;
+    out->next_index = 0;
+    out->is_map = false;
+    if (handles.tag != HV_ARR || !handles.u.a) return hp_of_arr(out);
+    int to = (int)hp_val_to_int(timeout_ms);
+    if (to < 0) to = 0;
+    hp_poll_into(out, handles.u.a, to);
+    return hp_of_arr(out);
+}
+
 hval hpbi_stream_ready(hval handles, hval timeout_ms) {
     hp_net_init();
     harr *out = hp_arr_new();
@@ -4459,6 +4523,37 @@ static sqlite3 *hp_sqlite_db(hval v) {
 }
 static sqlite3_stmt *hp_sqlite_stmt(hval v) {
     return (sqlite3_stmt *)(intptr_t)hp_val_to_int(v);
+}
+
+/* Request-scope memory: the server loop wraps one poll cycle in
+ * scope_begin()/scope_end(); strings allocated in between are released in
+ * one shot. str_persist() copies a value out of the scope, str_free()/
+ * arr_free() release heap values early. */
+hval hpbi_scope_begin(void) { hp_scope_begin(); return hp_of_bool(true); }
+hval hpbi_scope_end(void) { hp_scope_end(); return hp_of_bool(true); }
+hval hpbi_str_persist(hval s) { return hp_of_str(hp_str_persist(hp_val_to_str(s))); }
+hval hpbi_str_free(hval s) {
+    if (s.tag == HV_STR) hp_str_free(s.u.s);
+    return hp_of_bool(true);
+}
+hval hpbi_live_allocs(void) { return hp_of_int(hp_live_allocs()); }
+hval hpbi_live_bytes(void) { return hp_of_int(hp_live_bytes()); }
+hval hpbi_arr_clear(hval a) {
+    if (a.tag == HV_ARR && a.u.a) {
+        harr *x = a.u.a;
+        x->len = 0;
+        x->next_index = 0;
+        x->is_map = false;
+        if (x->index) {
+            memset(x->index, 0, (size_t)x->icap * sizeof(uint32_t));
+            x->ibudget = x->icap;
+        }
+    }
+    return hp_of_bool(true);
+}
+hval hpbi_arr_free(hval a) {
+    if (a.tag == HV_ARR && a.u.a) hp_arr_free(a.u.a);
+    return hp_of_bool(true);
 }
 
 hval hpbi_sqlite_open(hval path) {
