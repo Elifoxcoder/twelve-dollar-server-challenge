@@ -165,7 +165,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 | — | goose-native-tbsvttr | #143 | Goose (native) | **failed** (install OOM) | | | | | | | | 2026-10-28 |
-| — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install OOM) | | | | | | | | 2026-10-29 |
+| — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
 | — | rust-hyper-dannie203 | #178 | Rust (hyper) | **failed** (build: no cargo) | | | | | | | | 2026-10-29 |
 | — | v-epoll-i098 (follow-up #191) | #191 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-29 |
 
@@ -279,7 +279,10 @@ committed in this repo.
   the install hit its 1-hour timeout, so the app never built (1/42 tests). Not patched.
 - **V #166 — install failed** (`1bcfd37`): `install.sh` runs `make` on the pinned V checkout (bootstrap from source,
   like #69), and it ran the 1 vCPU / 2 GB box out of memory: mu-c1 stopped answering from 02:11 to 03:06 and the
-  install hit its 1-hour timeout (exit 124), so the app never built (1/42 tests). Not patched.
+  install hit its 1-hour timeout (exit 124), so the app never built (1/42 tests). Not patched. Re-run at `e872f75`
+  (2026-10-30), which drops `make` and stops at `v2` (`vc/v.c` → `v1` → `v1 -no-parallel -gc none cmd/v`): no OOM kill
+  and the box stayed up, but it was still compiling when the install hit the 1-hour timeout again (exit 124), so
+  `/opt/twelve-v/v` was never installed (1/42 tests).
 - **Rust #178 — build failed** (`6aa144b`): `install.sh` installs Rust with rustup into root's `~/.cargo`, but
   `build.sh` runs as the `deploy` user, which has no `cargo` (exit 127), so the app never built (1/42 tests). CI passed
   because GitHub's runner has Rust preinstalled. Not patched.
