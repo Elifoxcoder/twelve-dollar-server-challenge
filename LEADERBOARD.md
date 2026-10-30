@@ -156,7 +156,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 126 | crystal-kemal-krthr | #146 | Crystal (Kemal) | **19,000** ᵐ | 1,869 | 27 | 153 | 0.00 | 24 | 119 | 1,631 | 2026-10-28 |
 | 128 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
 | 129 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
-| 130 | php-symfony-gnugat ᵖ | #136 | PHP (Symfony, FrankenPHP) | **15,500** | 1,522 | 179 | 261 | 0.00 | 98 | 599 | 954 | 2026-10-29 |
+| 130 | php-symfony-gnugat | #136 | PHP (Symfony, FrankenPHP) | **15,500** | 1,521 | 174 | 425 | 0.00 | 97 | 592 | 952 | 2026-10-30 |
 | 131 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
 | 132 | kotlin-ktor-graalvm-noamm9 | #53 | Kotlin (Ktor, GraalVM native) | **10,500** | 1,027 | 356 | 906 | 0.00 | 79 | 715 | 314 | 2026-10-26 |
 | 133 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
@@ -268,9 +268,6 @@ committed in this repo.
   whose 210,000 run was unpatched and replaced #74's row.
 - **Swift #43** — install failed: the toolchain URL is missing the `swift-6.2.1-RELEASE/` folder → HTTP 404 (it can't have
   worked on a clean box). Patch: the corrected URL.
-- **PHP #136** — setup failed (`8aabfc8`): the `frankenphp` apt package that `install.sh` installs enables and starts
-  its own `frankenphp.service` on :80, so the app couldn't bind (`address already in use`). Patch (on the box, not in
-  the code): `systemctl disable --now frankenphp` + `mask`. Held until `install.sh` does this itself.
 - **Nim #132 — failed, twice.** First run: passed /health, then wedged during the test suite — 0 s CPU, blocked in
   `io_uring_enter` (io_cqring_wait), 192 connections stuck in CLOSE-WAIT: its multishot accept stopped delivering. Retry
   (fresh build; its PGO build fell back to a plain build): stuck at the suite's first read. Kernel 6.8.0-117.
