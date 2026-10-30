@@ -26,7 +26,7 @@ done
 "$CC" -O2 "$BUILD"/obj/*.o -o "$BUILD/hphp" -lm -lpthread
 
 # 3. Compile the challenge server. hphp emits C11, then links it against the
-#    system SQLite and liburing installed by install.sh.
+#    system SQLite installed by install.sh.
 "$BUILD/hphp" build server.hphp -o bin/server
 
 echo "built: $PWD/bin/server"

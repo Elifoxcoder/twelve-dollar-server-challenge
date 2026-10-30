@@ -384,6 +384,7 @@ hval hpbi_stream_socket_server(hval addr);       /* "tcp://host:port" */
 hval hpbi_stream_socket_client(hval addr);
 hval hpbi_stream_socket_accept(hval srv);
 hval hpbi_stream_set_blocking(hval s, hval block);
+hval hpbi_stream_set_nodelay(hval s);
 hval hpbi_stream_recv(hval s, hval max);
 hval hpbi_stream_send(hval s, hval data);
 hval hpbi_stream_ready(hval handles, hval timeout_ms);
@@ -941,7 +942,24 @@ hval hpbi_passthru(hval cmd);
 hval hpbi_proc_open(hval cmd, hval cwd);
 hval hpbi_proc_get_status(hval h);
 hval hpbi_proc_kill(hval h);
-hval hpbi_holy_challenge_start(hval port, hval db_path);
+
+/* generic SQLite binding (hphp_std.c): open/prepare/bind/step/column */
+hval hpbi_sqlite_open(hval path);
+hval hpbi_sqlite_close(hval db);
+hval hpbi_sqlite_exec(hval db, hval sql);
+hval hpbi_sqlite_prepare(hval db, hval sql);
+hval hpbi_sqlite_finalize(hval stmt);
+hval hpbi_sqlite_bind_int(hval stmt, hval idx, hval value);
+hval hpbi_sqlite_bind_text(hval stmt, hval idx, hval value);
+hval hpbi_sqlite_step(hval stmt);
+hval hpbi_sqlite_reset(hval stmt);
+hval hpbi_sqlite_clear_bindings(hval stmt);
+hval hpbi_sqlite_column_text(hval stmt, hval col);
+hval hpbi_sqlite_column_int(hval stmt, hval col);
+hval hpbi_sqlite_changes(hval db);
+hval hpbi_sqlite_last_insert_rowid(hval db);
+hval hpbi_sqlite_errmsg(hval db);
+hval hpbi_sqlite_busy_timeout(hval db, hval ms);
 
 #ifdef __cplusplus
 }

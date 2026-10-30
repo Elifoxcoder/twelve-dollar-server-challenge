@@ -279,6 +279,7 @@ void builtins_init(void) {
     add("stream_socket_accept", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept2", B_MISC, ty_mixed, false, false);   /* (srv, timeoutMs): false on timeout */
     add("stream_set_blocking",  B_MISC, ty_bool,   false, false);
+    add("stream_set_nodelay",   B_MISC, ty_bool,   false, false);
     add("stream_ready",         B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_recv",          B_MISC, ty_string, false, false);
     add("stream_send",          B_MISC, ty_int,    false, false);
@@ -838,7 +839,24 @@ void builtins_init(void) {
     add("ffi_load",      B_STR1,    ty_mixed,  true,  false);
     add("ffi_call",      B_MISC,    ty_mixed,  true,  true);
     add("heap_dump",     B_MISC,    ty_string, true,  false);
-    add("holy_challenge_start", B_MISC, ty_int, false, false);
+
+    /* generic SQLite binding */
+    add("sqlite_open",          B_MISC, ty_int,    false, false);  /* (path) -> handle|0 */
+    add("sqlite_close",         B_MISC, ty_bool,   false, false);
+    add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */
+    add("sqlite_prepare",       B_MISC, ty_int,    false, false);  /* (db, sql) -> stmt|0 */
+    add("sqlite_finalize",      B_MISC, ty_bool,   false, false);
+    add("sqlite_bind_int",      B_MISC, ty_bool,   false, false);  /* (stmt, 1-based idx, value) */
+    add("sqlite_bind_text",     B_MISC, ty_bool,   false, false);
+    add("sqlite_step",          B_MISC, ty_int,    false, false);  /* 100 row, 101 done */
+    add("sqlite_reset",         B_MISC, ty_int,    false, false);
+    add("sqlite_clear_bindings",B_MISC, ty_bool,   false, false);
+    add("sqlite_column_text",   B_MISC, ty_string, false, false);
+    add("sqlite_column_int",    B_MISC, ty_int,    false, false);
+    add("sqlite_changes",       B_MISC, ty_int,    false, false);
+    add("sqlite_last_insert_rowid", B_MISC, ty_int, false, false);
+    add("sqlite_errmsg",        B_MISC, ty_string, false, false);
+    add("sqlite_busy_timeout",  B_MISC, ty_bool,   false, false);
 }
 
 const Builtin *builtin_lookup(const char *name) {

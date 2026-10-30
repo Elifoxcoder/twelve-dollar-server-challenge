@@ -852,7 +852,7 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
                              opt, subsys, objlist, out);
 #else
             /* POSIX: sockets live in libc, the UI layer is inert stubs */
-            char *link = fmt("gcc %s %s -o %s -lm -lpthread -lsqlite3 -luring",
+            char *link = fmt("gcc %s %s -o %s -lm -lpthread -lsqlite3",
                              opt, objlist, out);
 #endif
             rc = run_direct(link, !verbose);
