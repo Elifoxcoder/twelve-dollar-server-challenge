@@ -61,7 +61,7 @@ void hp_echo(hval v) {
 /* ---------------- string builder ---------------- */
 void hbuf_init(Buf *b) { b->data = NULL; b->len = b->cap = 0; }
 
-static void hbuf_grow(Buf *b, size_t need) {
+static void hbuf_grow_impl(Buf *b, size_t need) {
     if (b->len + need + 1 <= b->cap) return;
     size_t ncap = b->cap ? b->cap : 64;
     while (ncap < b->len + need + 1) ncap *= 2;
@@ -70,15 +70,8 @@ static void hbuf_grow(Buf *b, size_t need) {
     b->cap = ncap;
 }
 
-void hbuf_reserve(Buf *b, size_t n) { hbuf_grow(b, n); }
-void hbuf_putc(Buf *b, char c) { hbuf_grow(b, 1); b->data[b->len++] = c; b->data[b->len] = 0; }
-
-void hbuf_write(Buf *b, const char *s, size_t n) {
-    hbuf_grow(b, n);
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-    b->data[b->len] = 0;
-}
+void hbuf_grow_slow(Buf *b, size_t need) { hbuf_grow_impl(b, need); }
+void hbuf_reserve(Buf *b, size_t n) { hbuf_grow_impl(b, n); }
 
 void hbuf_puts(Buf *b, const char *s) { hbuf_write(b, s, strlen(s)); }
 
@@ -90,7 +83,7 @@ void hbuf_printf(Buf *b, const char *fmt, ...) {
     int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     if (n > 0) {
-        hbuf_grow(b, (size_t)n);
+        hbuf_need(b, (size_t)n);
         vsnprintf(b->data + b->len, (size_t)n + 1, fmt, ap2);
         b->len += (size_t)n;
     }
@@ -584,10 +577,7 @@ hstr *hp_str_reverse(hstr *s) {
 /* ---------------- values ---------------- */
 hval hp_null = { HV_NULL, { 0 } };
 
-hval hp_of_int(int64_t i) { hval v = { HV_INT, { .i = i } }; return v; }
 hval hp_of_float(double f) { hval v = { HV_FLOAT, { .f = f } }; return v; }
-hval hp_of_bool(bool b) { hval v = { HV_BOOL, { .b = b } }; return v; }
-hval hp_of_str(hstr *s) { hval v = { HV_STR, { .s = s } }; return v; }
 hval hp_of_arr(harr *a) { hval v = { HV_ARR, { .a = a } }; return v; }
 hval hp_of_ptr(void *p) { hval v = { HV_OBJ, { .p = p } }; return v; }
 
@@ -637,7 +627,7 @@ hstr *hp_val_to_str(hval v) {
     }
 }
 
-int64_t hp_val_to_int(hval v) {
+int64_t hp_val_to_int_slow(hval v) {
     switch (v.tag) {
     case HV_INT: return v.u.i;
     case HV_FLOAT: return (int64_t)v.u.f;

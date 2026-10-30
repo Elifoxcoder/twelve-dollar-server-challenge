@@ -295,6 +295,10 @@ class Server {
     pub int $btLikes = 0;
     pub int $btUsers = 0;
 
+    /* Connection shedding: computed from the process's real fd limit */
+    pub int $shedAt = 58000;
+    pub int $paused = 0;
+
     pub int $feed = 0;
     pub int $post = 0;
     pub int $health = 0;
@@ -325,6 +329,10 @@ class Server {
         sqlite_exec($db, "PRAGMA cache_size=-65536");
         sqlite_exec($db, "PRAGMA mmap_size=268435456");
         sqlite_exec($db, "PRAGMA foreign_keys=OFF");
+        /* The default 1000-page checkpoint runs every few commits on the
+         * event loop; 4000 keeps the WAL small enough that page lookups stay
+         * cheap without checkpointing constantly. */
+        sqlite_exec($db, "PRAGMA wal_autocheckpoint=4000");
 
         /* The response bodies are rendered by SQLite's JSON1 functions, in
          * the exact key order the spec wants. The feed's ordering comes from
@@ -375,16 +383,15 @@ class Server {
         }
 
         $q = "INSERT INTO posts (user_id, body) VALUES (?1, ?2) "
-           . "RETURNING json_object('post', json_object("
-           . "'id', id, 'body', body, 'created_at', created_at, "
-           . "'author', ?3, 'like_count', 0))";
+           . "RETURNING id, created_at";
         $this->insPost = sqlite_prepare($db, $q);
         if ($this->insPost == 0) {
             echo "fatal: insert post: " . sqlite_errmsg($db) . "\n";
             return false;
         }
 
-        $q = "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) "
+        $q = "INSERT INTO likes (user_id, post_id) "
+           . "SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) "
            . "ON CONFLICT (user_id, post_id) DO NOTHING";
         $this->insLike = sqlite_prepare($db, $q);
         if ($this->insLike == 0) {
@@ -420,6 +427,16 @@ class Server {
         $this->srv = intval($srv);
         epoll_add($this->srv);
 
+        /* Shed only when the process is really near its descriptor limit.
+         * The box sets LimitNOFILE; a hard 58,000 would close every response
+         * once more than 58,000 users are connected. */
+        $lim = nofile_limit();
+        if ($lim > 0) {
+            $this->shedAt = $lim - 4096;
+            if ($this->shedAt < 32000) { $this->shedAt = 32000; }
+            if ($this->shedAt > $lim) { $this->shedAt = $lim; }
+        }
+
         $codes = [200, 201, 400, 401, 404, 500, 503];
         $texts = ["OK", "Created", "Bad Request", "Unauthorized",
                   "Not Found", "Internal Server Error", "Service Unavailable"];
@@ -435,6 +452,22 @@ class Server {
 
     /* -------------------------------------------------------- main loop */
 
+    public function handle_ready(): void {
+        foreach ($this->ready as $h) {
+            $fd = intval($h);
+            if ($fd == $this->srv) {
+                $this->accept_all();
+            } else {
+                /* Every fd in the epoll set came from accept(), so it is
+                 * ours even if the bookkeeping array lost the entry.
+                 * read_fd() closes it on EOF, which also drops the epoll
+                 * registration — never skip a ready fd, or the loop
+                 * spins on it forever. */
+                $this->read_fd($fd);
+            }
+        }
+    }
+
     public function run(): void {
         while (true) {
             /* Everything allocated while serving this poll cycle is released
@@ -442,23 +475,22 @@ class Server {
             scope_begin();
 
             epoll_wait_into($this->ready, 50);
-            foreach ($this->ready as $h) {
-                $fd = intval($h);
-                if ($fd == $this->srv) {
-                    $this->accept_all();
-                } else {
-                    /* Every fd in the epoll set came from accept(), so it is
-                     * ours even if the bookkeeping array lost the entry.
-                     * read_fd() closes it on EOF, which also drops the epoll
-                     * registration — never skip a ready fd, or the loop
-                     * spins on it forever. */
-                    $this->read_fd($fd);
-                }
+            $this->handle_ready();
+            /* A transaction has a fixed cost; when only a few writes are
+             * pending, wait up to a millisecond for more requests before
+             * committing. That batches them without hurting the tail much. */
+            $n = count($this->pending);
+            if ($n > 0 && $n < 32) {
+                epoll_wait_into($this->ready, 1);
+                $this->handle_ready();
             }
             $this->execute_writes();
 
             $now = time();
-            if ($now != $this->sweep) {
+            /* Sweeping 110k sockets every second is pure overhead; every five
+             * seconds still expires idle connections well after the 90 s
+             * the spec asks for. */
+            if ($now - $this->sweep >= 5) {
                 $this->sweep = $now;
                 $this->expire($now);
             }
@@ -467,10 +499,18 @@ class Server {
         }
     }
 
-    public function accept_all(): void {
-        while (true) {
+    public function accept_all(): void {        while (true) {
             $s = stream_socket_accept2($this->srv, 0);
-            if ($s === false) { return; }
+            if ($s === false) {
+                /* Out of descriptors: stop watching the listener so a
+                 * level-triggered epoll does not return it every cycle.
+                 * close_fd() re-arms it once there is room again. */
+                if ($this->paused == 0 && count($this->socks) >= $this->shedAt) {
+                    epoll_del($this->srv);
+                    $this->paused = 1;
+                }
+                return;
+            }
             $fd = intval($s);
             if ($fd <= 0) { return; }
             stream_set_nodelay($fd);
@@ -500,6 +540,11 @@ class Server {
         unset($this->lasts[$fd]);
         epoll_del($fd);
         stream_close($fd);
+        /* room again: watch the listener */
+        if ($this->paused == 1 && count($this->socks) < $this->shedAt - 1024) {
+            $this->paused = 0;
+            epoll_add($this->srv);
+        }
     }
 
     /* -------------------------------------------------------- read side */
@@ -968,41 +1013,35 @@ class Server {
     }
 
     /* string value of "key" in a flat JSON object, "" when absent or not a
-     * string. Saves decoding a whole object into an array per request. */
+     * string. One strpos scan and one substr: building the value character by
+     * character reallocated the string per byte and dominated the auth cost. */
     public function json_str(string $j, string $key): string {
-        $n = strlen($j);
         $k = "\"" . $key . "\"";
         $p = strpos($j, $k);
         if ($p === false) { return ""; }
-        $i = intval($p) + strlen($k);
-        while ($i < $n && $j[$i] != ":") {
-            $c = $j[$i];
-            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { return ""; }
-            $i++;
-        }
-        if ($i >= $n) { return ""; }
-        $i++;
-        while ($i < $n && $j[$i] != "\"") {
-            $c = $j[$i];
-            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { return ""; }
-            $i++;
-        }
-        if ($i >= $n) { return ""; }
-        $i++;
+        $c = strpos($j, ":", intval($p) + strlen($k));
+        if ($c === false) { return ""; }
+        $q = strpos($j, "\"", intval($c) + 1);
+        if ($q === false) { return ""; }
+        $e = strpos($j, "\"", intval($q) + 1);
+        if ($e === false) { return ""; }
+        $v = substr($j, intval($q) + 1, intval($e) - intval($q) - 1);
+        if (strpos($v, chr(92)) === false) { return $v; }
+        /* escaped value: unescape into a new string */
         $out = "";
+        $i = 0;
+        $n = strlen($v);
         while ($i < $n) {
-            $c = $j[$i];
-            if ($c == "\"") { return $out; }
-            if ($c == chr(92)) {
-                $i++;
-                if ($i >= $n) { return ""; }
-                $out .= $j[$i];
+            $ch = $v[$i];
+            if ($ch == chr(92) && $i + 1 < $n) {
+                $i = $i + 1;
+                $out .= $v[$i];
             } else {
-                $out .= $c;
+                $out .= $ch;
             }
-            $i++;
+            $i = $i + 1;
         }
-        return "";
+        return $out;
     }
 
     /* integer value of "key", -1 when absent or not a number */
@@ -1040,14 +1079,9 @@ class Server {
     }
 
     public function b64url(string $s): string {
-        /* two whole-string replacements instead of rebuilding the token one
-         * character at a time */
-        $t = str_replace("-", "+", $s);
-        $t = str_replace("_", "/", $t);
-        $r = strlen($t) % 4;
-        if ($r == 2) { $t .= "=="; }
-        else if ($r == 3) { $t .= "="; }
-        return base64_decode($t);
+        /* base64url is decoded natively: '-' and '_' are part of the
+         * alphabet and missing padding is fine, so no replacement strings. */
+        return base64_decode($s);
     }
 
     public function parse_id($s) {
@@ -1092,27 +1126,33 @@ class Server {
             if ($r["kind"] == 1) {
                 sqlite_bind_int($this->insPost, 1, $r["uid"]);
                 sqlite_bind_text($this->insPost, 2, $r["text"]);
-                sqlite_bind_text($this->insPost, 3, $r["name"]);
                 $rc = sqlite_step($this->insPost);
                 if ($rc != 100) { $ok = false; break; }
-                $r["body"] = sqlite_column_text($this->insPost, 0);
-                $r["code"] = 201;
+                $pid = sqlite_column_int($this->insPost, 0);
+                $cat = sqlite_column_text($this->insPost, 1);
                 sqlite_step($this->insPost);
                 sqlite_reset($this->insPost);
                 sqlite_clear_bindings($this->insPost);
+                /* build the body here instead of asking SQLite's JSON
+                 * functions to format it inside the statement */
+                $sb = sb_new();
+                sb_reserve($sb, 256);
+                sb_put($sb, '{"post":{"id":');
+                sb_int($sb, $pid);
+                sb_put($sb, ',"body":');
+                sb_json_str($sb, $r["text"]);
+                sb_put($sb, ',"created_at":');
+                sb_json_str($sb, $cat);
+                sb_put($sb, ',"author":');
+                sb_json_str($sb, $r["name"]);
+                sb_put($sb, ',"like_count":0}}');
+                $r["body"] = sb_take($sb);
+                $r["code"] = 201;
                 $this->pending[$i] = $r;
             } else if ($r["kind"] == 2) {
-                sqlite_bind_int($this->hasPost, 1, $r["pid"]);
-                $hc = sqlite_step($this->hasPost);
-                sqlite_reset($this->hasPost);
-                sqlite_clear_bindings($this->hasPost);
-                if ($hc != 100) {
-                    $r["code"] = 404;
-                    $r["body"] = '{"error":"post not found"}';
-                    $this->pending[$i] = $r;
-                    $i = $i + 1;
-                    continue;
-                }
+                /* One statement for the common case: insert only when the
+                 * post exists. changes() == 0 then means "already liked" or
+                 * "no such post", and only that case pays for a lookup. */
                 sqlite_bind_int($this->insLike, 1, $r["uid"]);
                 sqlite_bind_int($this->insLike, 2, $r["pid"]);
                 $rc = sqlite_step($this->insLike);
@@ -1124,8 +1164,17 @@ class Server {
                     $r["code"] = 201;
                     $r["body"] = '{"liked":true,"already_liked":false,"post_id":' . $r["pid"] . '}';
                 } else {
-                    $r["code"] = 200;
-                    $r["body"] = '{"liked":true,"already_liked":true,"post_id":' . $r["pid"] . '}';
+                    sqlite_bind_int($this->hasPost, 1, $r["pid"]);
+                    $hc = sqlite_step($this->hasPost);
+                    sqlite_reset($this->hasPost);
+                    sqlite_clear_bindings($this->hasPost);
+                    if ($hc != 100) {
+                        $r["code"] = 404;
+                        $r["body"] = '{"error":"post not found"}';
+                    } else {
+                        $r["code"] = 200;
+                        $r["body"] = '{"liked":true,"already_liked":true,"post_id":' . $r["pid"] . '}';
+                    }
                 }
                 $this->pending[$i] = $r;
             }
@@ -1167,10 +1216,11 @@ class Server {
     }
 
     public function write_response(int $fd, int $code, string $body): void {
-        /* Direct mode holds one fd per user. Keep a reserve below the box's
-         * 65535 LimitNOFILE: above the threshold the response asks the client
-         * to reconnect, so new users are never refused. */
-        $shed = count($this->socks) >= 58000;
+        /* Direct mode holds one fd per user. Shed only when the process is
+         * really running out of descriptors: the limit is read once at
+         * startup (getrlimit), so a box with a higher LimitNOFILE keeps
+         * every connection instead of closing one per response. */
+        $shed = count($this->socks) >= $this->shedAt;
         $blen = strlen($body);
         /* The status line and the fixed headers are prebuilt per code, so a
          * response costs three concatenations instead of ten. */
@@ -1184,10 +1234,9 @@ class Server {
             if ($sent != strlen($out) || $shed) { $this->close_fd($fd); }
             return;
         }
-        /* one write: a syscall costs more than copying the payload */
-        $out = $h . $body;
-        $sent = stream_send($fd, $out);
-        if ($sent != strlen($out) || $shed) { $this->close_fd($fd); }
+        /* header and body in one writev: no copy of the payload */
+        $sent = stream_send2($fd, $h, $body);
+        if ($sent != strlen($h) + $blen || $shed) { $this->close_fd($fd); }
     }
 }
 

@@ -57,6 +57,8 @@ typedef SOCKET hp_sock;
 #include <poll.h>
 #if !defined(_WIN32)
 #include <sys/epoll.h>
+#include <sys/uio.h>
+#include <sys/resource.h>
 #endif
 #include <fcntl.h>
 #include <errno.h>
@@ -689,8 +691,8 @@ static int b64_val(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
+    if (c == '+' || c == '-') return 62;   /* base64 and base64url */
+    if (c == '/' || c == '_') return 63;
     return -1;
 }
 static hstr *hp_b64_decode(hstr *in) {
@@ -1935,7 +1937,7 @@ hval hpbi_stream_socket_server(hval addr) {
     if (s == HP_SOCK_BAD) { freeaddrinfo(res); return hp_of_int(-1); }
     int yes = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof yes);
-    if (bind(s, res->ai_addr, (int)res->ai_addrlen) != 0 || listen(s, 128) != 0) {
+    if (bind(s, res->ai_addr, (int)res->ai_addrlen) != 0 || listen(s, 4096) != 0) {
         freeaddrinfo(res);
         hp_sock_close(s);
         return hp_of_bool(false);   /* PHP-style: failure is falsy */
@@ -2075,6 +2077,58 @@ hval hpbi_stream_send(hval s, hval data) {
         if (r > 0) { sent += (size_t)r; continue; }
         if (r < 0 && hp_sock_wouldblock() && waited_ms < 2000) {
             sock_sleep_ms(1);        /* let the peer drain; frames stay whole */
+            waited_ms++;
+            continue;
+        }
+        if (r < 0) sockrec((intptr_t)fd, true)->eof = true;
+        break;
+    }
+    return hp_of_int((int64_t)sent);
+}
+
+/* The process's descriptor limit, so the server sheds connections only when
+ * it is really about to run out (0 = unknown). */
+hval hpbi_nofile_limit(void) {
+#if defined(_WIN32)
+    return hp_of_int(0);
+#else
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return hp_of_int(0);
+    return hp_of_int((int64_t)rl.rlim_cur);
+#endif
+}
+
+/* Two buffers, one syscall: the header and the body of a response without
+ * copying the body into a new string. Returns the bytes written. */
+hval hpbi_stream_send2(hval s, hval a, hval b) {
+    hp_net_init();
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD) return hp_of_int(0);
+    hstr *x = hp_val_to_str(a);
+    hstr *y = hp_val_to_str(b);
+    size_t total = x->len + y->len;
+    size_t sent = 0;
+    int waited_ms = 0;
+    while (sent < total) {
+        long long r;
+#if defined(_WIN32)
+        if (sent < x->len) r = send(fd, x->data + sent, (int)(x->len - sent), 0);
+        else r = send(fd, y->data + (sent - x->len), (int)(total - sent), 0);
+#else
+        if (sent < x->len) {
+            struct iovec iov[2];
+            iov[0].iov_base = x->data + sent;
+            iov[0].iov_len = x->len - sent;
+            iov[1].iov_base = y->data;
+            iov[1].iov_len = y->len;
+            r = (long long)writev(fd, iov, 2);
+        } else {
+            r = send(fd, y->data + (sent - x->len), (int)(total - sent), 0);
+        }
+#endif
+        if (r > 0) { sent += (size_t)r; continue; }
+        if (r < 0 && hp_sock_wouldblock() && waited_ms < 2000) {
+            sock_sleep_ms(1);
             waited_ms++;
             continue;
         }
@@ -4719,38 +4773,55 @@ hval hpbi_sb_int(hval h, hval n) {
     hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
     return hp_of_bool(true);
 }
-/* append a quoted, escaped JSON string for n bytes at p. Runs of ordinary
- * bytes are copied in one go: escaping a 500-byte body must not cost 500
- * calls with a capacity check each. */
+/* Find the first byte that JSON must escape (c < 0x20, '"' or '\\').
+ * Clean runs are scanned eight bytes at a time. */
+static size_t json_next_special(const unsigned char *p, size_t n, size_t i) {
+    while (i + 8 <= n) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        /* bytes < 0x20 (high bit set in the mask for those lanes) */
+        uint64_t lt = (v - 0x2020202020202020ULL) & ~v & 0x8080808080808080ULL;
+        uint64_t zq = v ^ 0x2222222222222222ULL;
+        uint64_t zb = v ^ 0x5C5C5C5C5C5C5C5CULL;
+        uint64_t q = (zq - 0x0101010101010101ULL) & ~zq & 0x8080808080808080ULL;
+        uint64_t b = (zb - 0x0101010101010101ULL) & ~zb & 0x8080808080808080ULL;
+        if (!(lt | q | b)) { i += 8; continue; }
+        break;
+    }
+    while (i < n) {
+        unsigned char c = p[i];
+        if (c < 0x20 || c == '"' || c == '\\') return i;
+        i++;
+    }
+    return n;
+}
+
+/* append a quoted, escaped JSON string for n bytes at p */
 static void sb_json_esc(Buf *b, const unsigned char *p, size_t n) {
     static const char H[] = "0123456789abcdef";
-    /* one lookup per byte instead of a chain of comparisons */
-    static unsigned char esc[256];
-    static int esc_ready = 0;
-    size_t i, start = 0;
-    if (!esc_ready) {
-        int k;
-        for (k = 0; k < 256; k++) esc[k] = (unsigned char)(k < 0x20 || k == '"' || k == '\\');
-        esc_ready = 1;
-    }
+    size_t i = 0;
     hbuf_putc(b, '"');
-    for (i = 0; i < n; i++) {
-        unsigned char c = p[i];
-        if (esc[c]) {
-            if (i > start) hbuf_write(b, (const char *)p + start, i - start);
-            if (c == '"' || c == '\\') { hbuf_putc(b, '\\'); hbuf_putc(b, (char)c); }
-            else if (c == '\n') hbuf_puts(b, "\\n");
-            else if (c == '\r') hbuf_puts(b, "\\r");
-            else if (c == '\t') hbuf_puts(b, "\\t");
-            else {
-                hbuf_puts(b, "\\u00");
-                hbuf_putc(b, H[(c >> 4) & 15]);
-                hbuf_putc(b, H[c & 15]);
-            }
-            start = i + 1;
+    while (i < n) {
+        size_t j = json_next_special(p, n, i);
+        if (j > i) {
+            hbuf_write(b, (const char *)p + i, j - i);
+            i = j;
         }
+        if (i >= n) break;
+        unsigned char c = p[i];
+        if (c == '"' || c == '\\') { hbuf_putc(b, '\\'); hbuf_putc(b, (char)c); }
+        else if (c == '\n') hbuf_puts(b, "\\n");
+        else if (c == '\r') hbuf_puts(b, "\\r");
+        else if (c == '\t') hbuf_puts(b, "\\t");
+        else if (c == '\b') hbuf_puts(b, "\\b");
+        else if (c == '\f') hbuf_puts(b, "\\f");
+        else {
+            hbuf_puts(b, "\\u00");
+            hbuf_putc(b, H[(c >> 4) & 15]);
+            hbuf_putc(b, H[c & 15]);
+        }
+        i++;
     }
-    if (n > start) hbuf_write(b, (const char *)p + start, n - start);
     hbuf_putc(b, '"');
 }
 hval hpbi_sb_json(hval h, hval ptr, hval len) {

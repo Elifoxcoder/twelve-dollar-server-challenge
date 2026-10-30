@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <stdarg.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,8 +24,24 @@ typedef struct {
 } Buf;
 void hbuf_init(Buf *b);
 void hbuf_reserve(Buf *b, size_t n);
-void hbuf_putc(Buf *b, char c);
-void hbuf_write(Buf *b, const char *s, size_t n);
+void hbuf_grow_slow(Buf *b, size_t need);
+
+/* Inline fast path: every response byte goes through these, and a call plus a
+ * capacity check per byte is measurable. */
+static inline void hbuf_need(Buf *b, size_t n) {
+    if (b->len + n + 1 > b->cap) hbuf_grow_slow(b, n);
+}
+static inline void hbuf_putc(Buf *b, char c) {
+    hbuf_need(b, 1);
+    b->data[b->len++] = c;
+    b->data[b->len] = 0;
+}
+static inline void hbuf_write(Buf *b, const char *s, size_t n) {
+    hbuf_need(b, n);
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = 0;
+}
 void hbuf_puts(Buf *b, const char *s);
 void hbuf_printf(Buf *b, const char *fmt, ...);
 char *hbuf_take(Buf *b); /* NUL-terminated, transfers ownership */
@@ -116,13 +133,38 @@ struct hval {
     } u;
 };
 
-hval hp_of_int(int64_t i);
 hval hp_of_float(double f);
-hval hp_of_bool(bool b);
-hval hp_of_str(hstr *s);
 hval hp_of_arr(harr *a);
 hval hp_of_ptr(void *p);
 hval hp_of_clo(hclosure *c);
+
+/* The hot boxing/unboxing paths are inline: every builtin call and every
+ * array index goes through them, and a function call there shows up in the
+ * profile. The slow cases live in hphp_rt.c. */
+static inline hval hp_of_int(int64_t i) {
+    hval v;
+    v.tag = HV_INT;
+    v.u.i = i;
+    return v;
+}
+static inline hval hp_of_bool(bool b) {
+    hval v;
+    v.tag = HV_BOOL;
+    v.u.i = 0;      /* the whole union, so no uninitialised bytes travel */
+    v.u.b = b;
+    return v;
+}
+static inline hval hp_of_str(hstr *s) {
+    hval v;
+    v.tag = HV_STR;
+    v.u.s = s;
+    return v;
+}
+int64_t hp_val_to_int_slow(hval v);
+static inline int64_t hp_val_to_int(hval v) {
+    if (v.tag == HV_INT) return v.u.i;
+    return hp_val_to_int_slow(v);
+}
 static inline hval hp_hv_id(hval v) { return v; }
 #define hv(x) _Generic((x), \
     hval: hp_hv_id, \
@@ -402,6 +444,8 @@ hval hpbi_stream_set_blocking(hval s, hval block);
 hval hpbi_stream_set_nodelay(hval s);
 hval hpbi_stream_recv(hval s, hval max);
 hval hpbi_stream_send(hval s, hval data);
+hval hpbi_stream_send2(hval s, hval a, hval b);
+hval hpbi_nofile_limit(void);
 hval hpbi_stream_ready(hval handles, hval timeout_ms);
 hval hpbi_stream_ready_into(hval out, hval handles, hval timeout_ms);
 hval hpbi_epoll_add(hval s);

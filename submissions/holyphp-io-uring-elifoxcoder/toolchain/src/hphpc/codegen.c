@@ -542,9 +542,13 @@ static void emit_c_string(const char *s, size_t n, Buf *dst) {
 
 static void emit_str_lit(const char *s, Buf *dst) {
     size_t n = strlen(s);
-    buf_puts(dst, "hp_str_intern(");
+    /* A per-call-site cache: the literal's address is stable, so the first
+     * evaluation interns it and every later one is a load instead of a hash
+     * probe. Statement expressions are a GCC/Clang extension; the backend
+     * compiles with gcc. */
+    buf_puts(dst, "({ static hstr *hp_lit_; if (!hp_lit_) hp_lit_ = hp_str_intern(");
     emit_c_string(s, n, dst);
-    buf_puts(dst, ")");
+    buf_puts(dst, "); hp_lit_; })");
 }
 
 /* ---------------- expressions ---------------- */
