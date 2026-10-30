@@ -17,7 +17,8 @@ passed a 5-minute hold** with p95 < 500 ms, p99 < 1 s, errors < 1 %. Every probe
 its merged code is newer than what was scored (`a08923d`). go-epoll-MegaPanchamZ is scored at its follow-up PR #144
 (`e66a931`, not merged yet); its earlier #72 run (`9df7449`) held 165,000. c-iouring-meros is scored at its follow-up PR #199 (`097ef9b`, not
 merged yet); its merged #137 code (`b2a5207`) held 235,000. fsharp-kestrel-delneg is scored at its follow-up PR #201
-(`a8bf27f`); its earlier #142 run (`45ebea5`) held 260,000.
+(`a8bf27f`); its earlier #142 run (`45ebea5`) held 260,000. c-iouring-moneebullah25 is scored at its follow-up PR
+#203 (`3f0c2c1`); its earlier #156 run (`065c235`) held 209,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -39,12 +40,12 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 7 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring) | **240,000** | 23,184 | 202 | 300 | 0.00 | 78 | 31 | 788 | 2026-10-28 |
 | 9 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
 | 10 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 11 | ada-native-visseranalytics | #198 | Ada (GNAT, io_uring) | **226,000** | 21,826 | 309 | 509 | 0.00 | 73 | 31 | 567 | 2026-10-30 |
-| 12 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 13 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
-| 13 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
-| 13 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
-| 16 | c-iouring-moneebullah25 | #156 | C (io_uring) | **209,000** | 20,460 | 51 | 309 | 0.00 | 83 | 38 | 1,132 | 2026-10-28 |
+| 11 | c-iouring-moneebullah25 | #203 | C (io_uring) | **230,000** | 22,377 | 9.3 | 37 | 0.00 | 66 | 27 | 1,106 | 2026-10-30 |
+| 12 | ada-native-visseranalytics | #198 | Ada (GNAT, io_uring) | **226,000** | 21,826 | 309 | 509 | 0.00 | 73 | 31 | 567 | 2026-10-30 |
+| 13 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 14 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
+| 14 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
+| 14 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
 | 17 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
 | 18 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
 | 18 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
