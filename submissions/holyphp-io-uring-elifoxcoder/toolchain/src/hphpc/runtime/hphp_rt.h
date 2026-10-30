@@ -1076,6 +1076,20 @@ int64_t hp_stream_send_nb_t(int64_t fd, hstr *s);
 int64_t hp_stream_send2_nb_t(int64_t fd, hstr *a, hstr *b);
 bool hp_epoll_mod_t(int64_t fd, int64_t mask);
 int64_t hp_nofile_limit_t(void);
+int64_t hp_strlen_t(hstr *s);
+hstr *hp_strtolower_t(hstr *s);
+hstr *hp_trim_t(hstr *s);
+hstr *hp_substr_t(hstr *s, int64_t start, int64_t len);
+hstr *hp_stream_recv_t(int64_t fd, int64_t maxn);
+bool hp_sqlite_bind_int_t(int64_t stmt, int64_t idx, int64_t v);
+bool hp_sqlite_bind_text_t(int64_t stmt, int64_t idx, hstr *s);
+int64_t hp_sqlite_step_t(int64_t stmt);
+int64_t hp_sqlite_reset_t(int64_t stmt);
+bool hp_sqlite_clear_bindings_t(int64_t stmt);
+hstr *hp_sqlite_column_text_t(int64_t stmt, int64_t col);
+int64_t hp_sqlite_column_int_t(int64_t stmt, int64_t col);
+int64_t hp_sqlite_changes_t(int64_t db);
+
 
 #ifdef __cplusplus
 }

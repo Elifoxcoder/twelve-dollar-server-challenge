@@ -5186,3 +5186,79 @@ int64_t hp_nofile_limit_t(void) {
     return (int64_t)rl.rlim_cur;
 #endif
 }
+
+/* ---- typed fast paths for the request/parse and SQLite calls ---- */
+
+int64_t hp_strlen_t(hstr *s) { return (int64_t)s->len; }
+hstr *hp_strtolower_t(hstr *s) { return hp_str_tolower(s); }
+hstr *hp_trim_t(hstr *s) { return hp_str_trim(s); }
+hstr *hp_substr_t(hstr *x, int64_t st, int64_t l) {
+    st = st < 0 ? st + (int64_t)x->len : st;
+    if (st < 0) st = 0;
+    if ((size_t)st > x->len) return hp_str_lit("");
+    if (l < 0) l = (int64_t)x->len - st + l;
+    if (l < 0) l = 0;
+    return hp_str_slice(x, st, st + l);
+}
+hstr *hp_stream_recv_t(int64_t fd, int64_t want) {
+    hp_net_init();
+    if ((hp_sock)fd == HP_SOCK_BAD) return hp_str_lit("");
+    if (want <= 0) want = 4096;
+    if (want > (1 << 20)) want = (1 << 20);
+    static _Thread_local char *g_rbuf = NULL;
+    static _Thread_local size_t g_rbuf_cap = 0;
+    if ((size_t)want > g_rbuf_cap) {
+        char *nb = (char *)realloc(g_rbuf, (size_t)want);
+        if (!nb) return hp_null_str();
+        g_rbuf = nb;
+        g_rbuf_cap = (size_t)want;
+    }
+    int r = recv((hp_sock)fd, g_rbuf, (int)want, 0);
+    bool blocked = (r < 0) && hp_sock_wouldblock();
+    if (r <= 0 && !blocked) sockrec((intptr_t)fd, true)->eof = true;
+    if (r > 0) return hp_str_new(g_rbuf, (size_t)r);
+    return hp_str_lit("");
+}
+bool hp_sqlite_bind_int_t(int64_t stv, int64_t idx, int64_t v) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return false;
+    return sqlite3_bind_int64(st, (int)idx, (sqlite3_int64)v) == SQLITE_OK;
+}
+bool hp_sqlite_bind_text_t(int64_t stv, int64_t idx, hstr *s) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return false;
+    return sqlite3_bind_text(st, (int)idx, s->data, (int)s->len, SQLITE_TRANSIENT) == SQLITE_OK;
+}
+int64_t hp_sqlite_step_t(int64_t stv) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return SQLITE_MISUSE;
+    return sqlite3_step(st);
+}
+int64_t hp_sqlite_reset_t(int64_t stv) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return SQLITE_MISUSE;
+    return sqlite3_reset(st);
+}
+bool hp_sqlite_clear_bindings_t(int64_t stv) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return false;
+    return sqlite3_clear_bindings(st) == SQLITE_OK;
+}
+hstr *hp_sqlite_column_text_t(int64_t stv, int64_t col) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return hp_str_lit("");
+    int i = (int)col;
+    const unsigned char *p = sqlite3_column_text(st, i);
+    int n = sqlite3_column_bytes(st, i);
+    if (!p) return hp_str_lit("");
+    return hp_str_new((const char *)p, (size_t)n);
+}
+int64_t hp_sqlite_column_int_t(int64_t stv, int64_t col) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return 0;
+    return (int64_t)sqlite3_column_int64(st, (int)col);
+}
+int64_t hp_sqlite_changes_t(int64_t dbv) {
+    sqlite3 *db = (sqlite3 *)(intptr_t)dbv;
+    return db ? (int64_t)sqlite3_changes(db) : 0;
+}
