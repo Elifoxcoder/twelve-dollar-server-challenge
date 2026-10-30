@@ -968,12 +968,10 @@ class Server {
             if ($sent != strlen($out) || $shed) { $this->close_fd($fd); }
             return;
         }
-        /* big body (/feed): write header and body separately so the 5 KB
-         * payload is not copied through one more string */
-        $sent = stream_send($fd, $h);
-        if ($sent != strlen($h)) { $this->close_fd($fd); return; }
-        $sent2 = stream_send($fd, $body);
-        if ($sent2 != $blen || $shed) { $this->close_fd($fd); }
+        /* one write: a syscall costs more than copying the payload */
+        $out = $h . $body;
+        $sent = stream_send($fd, $out);
+        if ($sent != strlen($out) || $shed) { $this->close_fd($fd); }
     }
 }
 
