@@ -309,6 +309,9 @@ class Server {
     pub array $sockList = [];
     pub int $sweepPos = 0;
 
+    /* Last time the WAL was drained by an explicit PASSIVE checkpoint */
+    pub int $ckpt = 0;
+
     pub int $feed = 0;
     pub int $post = 0;
     pub int $health = 0;
@@ -516,7 +519,18 @@ class Server {
 
             /* Idle sweep: a bounded slice per cycle, so 110k sockets never
              * turn into one long stall. */
-            $this->expire(time());
+            $now = time();
+            $this->expire($now);
+
+            /* Drain the WAL incrementally while no write is in flight, so the
+             * 4000-page auto-checkpoint never fires on a hot COMMIT and spikes
+             * a write's p99. PASSIVE never blocks a reader or writer and the
+             * fsync stays on COMMIT, so rule 6 (durable before responding) is
+             * untouched. */
+            if ($now >= $this->ckpt + 1) {
+                $this->ckpt = $now;
+                sqlite_exec($this->db, "PRAGMA wal_checkpoint(PASSIVE)");
+            }
 
             scope_end();
         }
