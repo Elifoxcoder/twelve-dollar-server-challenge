@@ -20,7 +20,8 @@ merged yet); its merged #137 code (`b2a5207`) held 235,000. fsharp-kestrel-delne
 (`a8bf27f`); its earlier #142 run (`45ebea5`) held 260,000. c-iouring-moneebullah25 is scored at its follow-up PR
 #203 (`3f0c2c1`); its earlier #156 run (`065c235`) held 209,000. asm-epoll-HauLTCE is scored at its follow-up PR #207
 (`d273c86`); its earlier #130 run (`8c3c277`) held 120,000. ada-native-visseranalytics is scored at its follow-up PR
-#216 (`ee683db`); its #211 run (`7ff01df`) also held 270,000 and its earlier #198 run (`bb6aee1`) held 226,000.
+#216 (`ee683db`); its #211 run (`7ff01df`) also held 270,000 and its earlier #198 run (`bb6aee1`) held 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #226
+(`a343a03`); its earlier #205 run (`6271ee8`) held 133,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -66,11 +67,11 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 32 | java-uring-crux | #170 | Java (FFM io_uring, C row formatter) | **158,000** | 15,531 | 137 | 312 | 0.00 | 72 | 43 | 1,139 | 2026-10-29 |
 | 33 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
 | 34 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
-| 35 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
-| 35 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
-| 35 | cider-iouring-pomilon | #208 | Cider (native x86-64, io_uring) | **135,000** | 13,168 | 256 | 489 | 0.00 | 88 | 62 | 425 | 2026-10-30 |
-| 35 | rust-native-M3M0KA | #222 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **135,000** | 13,264 | 102 | 225 | 0.00 | 93 | 65 | 1,386 | 2026-10-31 |
-| 39 | dexlang-iouring-ensamuel7 | #205 | DexLang (generated C, io_uring) | **133,000** | 13,053 | 91 | 198 | 0.00 | 76 | 54 | 673 | 2026-10-30 |
+| 35 | dexlang-iouring-ensamuel7 | #226 | DexLang (generated C, io_uring) | **140,000** | 13,726 | 97 | 272 | 0.00 | 78 | 53 | 708 | 2026-10-31 |
+| 36 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
+| 36 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
+| 36 | cider-iouring-pomilon | #208 | Cider (native x86-64, io_uring) | **135,000** | 13,168 | 256 | 489 | 0.00 | 88 | 62 | 425 | 2026-10-30 |
+| 36 | rust-native-M3M0KA | #222 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **135,000** | 13,264 | 102 | 225 | 0.00 | 93 | 65 | 1,386 | 2026-10-31 |
 | 40 | odin-odinhttp-wanderingaura | #139 | Odin (odin-http) | **130,000** | 12,644 | 429 | 924 | 0.00 | 82 | 60 | 624 | 2026-10-28 |
 | 40 | ruby-uring-cicloid | #197 | Ruby (io_uring) | **130,000** | 12,625 | 366 | 573 | 0.00 | 90 | 66 | 679 | 2026-10-29 |
 | 42 | go-epoll-champ3oy | #76 | Go (io_uring) | **128,000** | 12,604 | 3 | 23 | 0.00 | 77 | 57 | 385 | 2026-10-21 |
