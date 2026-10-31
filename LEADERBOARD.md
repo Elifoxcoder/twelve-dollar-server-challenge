@@ -192,6 +192,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
 | — | rust-hyper-dannie203 | #178 | Rust (hyper) | **failed** (build: no cargo) | | | | | | | | 2026-10-29 |
 | — | spice-ngspice-public | #220 | SPICE (ngspice + Verilog chip, sqlite3 CLI), behind Nginx | **failed** (0: 504s at 500 users) | | | | | | | | 2026-10-31 |
+| — | d-arsd-threadedcgi-cyrusmsk | #161 | D (arsd threaded cgi) | **failed** (0: timeouts at 500 users) | | | | | | | | 2026-10-31 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -338,6 +339,10 @@ committed in this repo.
   halves down from 20,000 to its 500-user floor, and every probe ran at 100 % CPU with Nginx 504s: 93 % errors at
   500 users (p50 30 s, 11 req/s, 70 ms of CPU per request), 99 % at 1,000–2,500. Its README expects ~150 users,
   below the search floor.
+- **D #161 — scored 0** (`0c25b60`, arsd `embedded_httpd_threads`, direct): installed, built and passed 42/42, but no
+  probe passed. From 20,000 down to the 500-user floor the app sat at 1–2 % CPU while 75–99 % of requests timed out
+  (500 users: 5 req/s, p50 60 s, 11 MB RAM): its fixed worker-thread pool is held by idle keep-alive connections, as
+  its README warns. Its sibling #160 (hybrid cgi) is the one scored above.
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
