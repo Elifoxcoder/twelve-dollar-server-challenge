@@ -231,6 +231,33 @@ bool hp_str_at_eq_t(hstr *x, int64_t st, int64_t n, hstr *y) {
     return memcmp(x->data + st, y->data, (size_t)n) == 0;
 }
 
+/* str_to_int($s): parse a decimal string to int, -1 on a non-digit,
+ * empty string, or a value outside (0, INT64_MAX]. Replaces a per-character
+ * HolyPHP loop in the server's parse_id(); the string argument stays unboxed. */
+hval hpbi_str_to_int(hval s) {
+    hstr *x = hp_val_to_str(s);
+    size_t n = x->len;
+    if (n < 1 || n > 18) return hp_of_int(-1);
+    int64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)x->data[i];
+        if (c < '0' || c > '9') return hp_of_int(-1);
+        v = v * 10 + (int64_t)(c - '0');
+    }
+    return hp_of_int(v <= 0 ? -1 : v);
+}
+int64_t hp_str_to_int_t(hstr *x) {
+    size_t n = x->len;
+    if (n < 1 || n > 18) return -1;
+    int64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)x->data[i];
+        if (c < '0' || c > '9') return -1;
+        v = v * 10 + (int64_t)(c - '0');
+    }
+    return v <= 0 ? -1 : v;
+}
+
 hval hpbi_str_contains(hval h, hval n) {
     RETB(hp_str_index(hp_val_to_str(h), hp_val_to_str(n)) >= 0);
 }

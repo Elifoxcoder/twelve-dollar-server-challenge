@@ -57,6 +57,7 @@ void builtins_init(void) {
     add("strpos",        B_MISC,    ty_mixed,  false, false);   /* (hay, needle[, offset]) -> int|false, PHP-style */
     add("str_contains",  B_STR2,    ty_bool,   false, false);
     add("str_at_eq",      B_MISC,    ty_bool,   false, false);
+    add("str_to_int",      B_MISC,    ty_int,    false, false);
     add("str_starts_with", B_STR2,  ty_bool,   false, false);
     add("str_ends_with", B_STR2,    ty_bool,   false, false);
     add("strcmp",        B_CMP,     ty_int,    false, false);
