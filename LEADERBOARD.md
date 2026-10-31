@@ -23,7 +23,10 @@ is scored at its follow-up PR #191 (`47a4cbb`); its earlier #113 run held 100,00
 its follow-up PR #218 (`15b3d62`); its earlier #202 run (`cc1105c`) held 60,000 (it refused connections past ~60k at
 30 % CPU). asm-epoll-HauLTCE is scored at its follow-up PR #207
 (`d273c86`); its earlier #130 run (`8c3c277`) held 120,000. ada-native-visseranalytics is scored at its follow-up PR
-#216 (`ee683db`); its #211 run (`7ff01df`) also held 270,000 and its earlier #198 run (`bb6aee1`) held 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #226
+#229 (`f0fb733`; 270,000 passed the 2-minute probe, but the 5-minute holds at 270,000, 257,000 and 244,000 failed on p99
+at 0 % errors);
+its #216 run (`ee683db`) and #211 run (`7ff01df`) held 270,000, its #223 run (`5eebfe2`) 257,000 and its earlier #198
+run (`bb6aee1`) 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #226
 (`a343a03`); its earlier #205 run (`6271ee8`) held 133,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
@@ -39,16 +42,16 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 1 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
 | 1 | mojo-iouring-oh-meh | #224 | Mojo (io_uring, SQLite B-tree reads) | **280,000** | 26,489 | 366 | 556 | 0.00 | 85 | 29 | 1,597 | 2026-10-31 |
 | 3 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 3 | ada-native-visseranalytics | #216 | Ada (GNAT, io_uring) | **270,000** ᵇ | 25,824 | 170 | 405 | 0.00 | 86 | 30 | 1,064 | 2026-10-30 |
-| 5 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 6 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
-| 7 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
-| 7 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 9 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 10 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
-| 11 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 11 | c-iouring-shivanshthapliyal | #214 | C (io_uring) | **238,000** | 22,803 | 425 | 699 | 0.00 | 80 | 32 | 613 | 2026-10-30 |
-| 13 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 4 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 5 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
+| 6 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
+| 6 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 8 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 9 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
+| 10 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 10 | c-iouring-shivanshthapliyal | #214 | C (io_uring) | **238,000** | 22,803 | 425 | 699 | 0.00 | 80 | 32 | 613 | 2026-10-30 |
+| 12 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 13 | ada-native-visseranalytics | #229 | Ada (GNAT, io_uring, SQLite B-tree reads) | **232,000** | 22,544 | 15 | 148 | 0.00 | 74 | 30 | 1,328 | 2026-10-31 |
 | 14 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
 | 15 | c-iouring-moneebullah25 | #228 | C (io_uring, SQLite B-tree reads) | **228,000** | 22,144 | 41 | 62 | 0.00 | 62 | 26 | 1,497 | 2026-10-31 |
 | 16 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
@@ -204,11 +207,6 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 failed the 2-minute probe on p99 (828 ms, 0 errors). Earlier heads: `8ee9c5a` scored 130,000 (2026-10-31), `c935dfe`
 64,000 (timeouts at ~70 % CPU) and `96aa4f5` 110,000 (2026-10-30). #235's head `3946b88` hasn't been scored yet. The row
 above stays on #204's merged code until the follow-up is scored and merged.
-
-ᵇ **Ada #216's follow-up #223** (`5eebfe2`, SQLite B-tree reads; not merged, replaced by #229, which is being scored)
-scored **257,000** (24,749 req/s, p95 22.8 / p99 151 ms, 0 err, 72 % CPU, 26 µs/req, 541 MB, 2026-10-31). 270,000
-passed the 2-minute probe but failed the 5-minute hold on p99 (1.89 s, 0 errors, 80 % CPU); 280,000 failed the 2-minute
-probe on p99. The row above stays on #216's merged code (270,000).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at
