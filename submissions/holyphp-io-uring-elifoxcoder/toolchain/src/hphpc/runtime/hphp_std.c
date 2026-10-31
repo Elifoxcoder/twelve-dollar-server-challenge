@@ -5786,8 +5786,9 @@ bool hp_iarr_set_t(int64_t h, int64_t k, int64_t v) {
 
 hval hpbi_sb_take(hval h) {
     HpSb *s = sb_h(h);
+    size_t n = s->b.len;
     char *p = hbuf_take(&s->b);
-    hstr *r = hp_str_new(p, strlen(p));
+    hstr *r = hp_str_new(p, n);
     free(p);
     free(s);
     return hp_of_str(r);
@@ -5952,8 +5953,9 @@ bool hp_sb_json_str_t(int64_t h, hstr *x) {
 }
 hstr *hp_sb_take_t(int64_t h) {
     HpSb *s = (HpSb *)(intptr_t)h;
+    size_t n = s->b.len;
     char *p = hbuf_take(&s->b);
-    hstr *r = hp_str_new(p, strlen(p));
+    hstr *r = hp_str_new(p, n);
     free(p);
     free(s);
     return r;
