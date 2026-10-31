@@ -548,8 +548,15 @@ class Server {
 
     /* Nginx keeps idle upstream connections for up to 60 s and the spec asks
      * us to hold them for at least 65 s, so only drop after 90 s of silence.
-     * A bounded slice per cycle: with 110k sockets a full pass is a stall. */
+     * The sweep is rate-limited to a slice per second (below): a per-cycle
+     * slice would walk ~20M entries/s at the benchmark's request rate. */
     public function expire(int $now): void {
+        /* Sweep at most once a second. The loop runs ~10k cycles/s when
+         * requests are spread out (think times), so a per-cycle slice burns
+         * the core for nothing; a full pass only needs to finish inside the
+         * 90 s idle window (2048/s over 15k sockets = 8 s). */
+        if ($now < $this->sweep + 1) { return; }
+        $this->sweep = $now;
         $n = count($this->sockList);
         if ($n == 0) { return; }
         $budget = 2048;
