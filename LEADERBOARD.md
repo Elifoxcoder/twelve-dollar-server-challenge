@@ -32,9 +32,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 
 | # | Submission | PR | Language | Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | µs/req | RAM MB | Scored |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 1 | mojo-iouring-oh-meh | #224 | Mojo (io_uring, SQLite B-tree reads) | **290,000** | 27,332 | 393 | 686 | 0.00 | 87 | 29 | 773 | 2026-10-31 |
-| 2 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
-| 2 | c-rawsqlite-larvance | #210 | C (io_uring, own SQLite-format engine, no libsqlite3) | **280,000** | 26,769 | 8.6 | 23.5 | 0.00 | 74 | 25 | 1,429 | 2026-10-30 |
+| 1 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
+| 1 | c-rawsqlite-larvance | #210 | C (io_uring, own SQLite-format engine, no libsqlite3) | **280,000** | 26,769 | 8.6 | 23.5 | 0.00 | 74 | 25 | 1,429 | 2026-10-30 |
+| 1 | mojo-iouring-oh-meh | #224 | Mojo (io_uring, SQLite B-tree reads) | **280,000** | 26,522 | 322 | 465 | 0.00 | 87 | 30 | 1,042 | 2026-10-31 |
 | 4 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,397 | 22.8 | 114 | 0.00 | 72 | 25 | 544 | 2026-10-31 |
 | 5 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
 | 5 | ada-native-visseranalytics | #216 | Ada (GNAT, io_uring) | **270,000** ᵇ | 25,824 | 170 | 405 | 0.00 | 86 | 30 | 1,064 | 2026-10-30 |
@@ -408,10 +408,11 @@ committed in this repo.
   Arjay (rules 2/3 question).
 - **mojo-iouring-oh-meh #224** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`src/shim.c`
   `#include`s the unmodified SQLite amalgamation, like lean-derive #153; writes use SQL). Its feed plan relies on an
-  invariant checked at startup (ids dense 1..n, `created_at` non-decreasing), kept as an in-memory flag plus the last
-  id, so `/feed` reads the last 20 rows of the posts B-tree; it switches to the SQL feed for good if an insert breaks
-  it (rule 5 question: state about the data, not a copy of it). Scored as submitted (290k at `1f4eb0b`); held open
-  for Arjay (rules 2/3/5 question).
+  invariant checked at startup (ids dense 1..n, `created_at` non-decreasing), kept as one in-memory boolean, so
+  `/feed` reads the last 20 rows of the posts B-tree; each insert reads the previous row back from SQLite and switches
+  to the SQL feed for good if the insert breaks it (rule 5 question: state about the data, not a copy of it). Scored
+  as submitted: 280k at `29024f3` (was 290k at `1f4eb0b`, which also kept the last id in memory); held open for Arjay
+  (rules 2/3/5 question).
 - **python-pyrustapi #147 serves its reads from the `pyrustapi` package's native SQL tier** (`sql=` route options),
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
