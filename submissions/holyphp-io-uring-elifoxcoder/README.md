@@ -42,6 +42,11 @@ the app itself.
 - **`Content-Encoding: identity`** — compression is optional per SPEC.md, and the
   box is CPU-bound, so the body goes out as-is.
 - **TCP_NODELAY**; idle connections held 90 s (spec asks ≥ 65 s).
+- **Rate-limited idle sweep.** Idle connections are detected by a cursor that
+  advances at most one 2048-entry slice per second (not per loop cycle): at the
+  benchmark's spread-out request rate the loop runs ~10k cycles/s, so a per-cycle
+  slice walked ~20M entries/s for nothing. A full pass still finishes far inside
+  the 90 s window.
 - **Connection shedding** above 58,000 open fds (the box sets
   `LimitNOFILE=65535`): such responses carry `Connection: close`, so new users
   are never refused.
@@ -98,10 +103,19 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 
 ## Measurements
 
-**On the challenge box** (benchmark agent, direct on :80, 5-minute hold): the
-B-tree build (`96aa4f5`) held **110,000 users**, up from 76,000 for the previous
-submission — 10,637 req/s, 73 µs/request at 83 % CPU, p95 210 ms, 0 errors.
-That is the number that counts; the local figures below are a proxy.
+**On the challenge box** (benchmark agent, direct on :80, 5-minute hold):
+
+| commit | users held 5 min | req/s | app CPU | µs/req | errors |
+|---|---:|---:|---:|---:|---:|
+| `96aa4f5` (B-tree feed) | 110,000 | 10,637 | 83 % | 73 | 0 |
+| `8ee9c5a` (send-path fix) | **130,000** | 12,618 | 93 % | 69 | 0 |
+
+The 64,000 at `c935dfe` was a bug (EAGAIN treated as fatal in the non-blocking
+send path), fixed in `8ee9c5a`. `30d155b` rate-limits the idle sweep to one
+slice per second — on the box that sweep was ~52 of the 69 µs/req (the
+endpoints are ~17 µs/req), so it should lift the CPU-bound ceiling further.
+That head is awaiting a box run. The numbers above are what count; the local
+figures below are a proxy.
 
 On a VPS shaped like the box (1 vCPU, 2 GB), fresh seed, `wrk`, measuring the
 server's own CPU from `/proc`:
