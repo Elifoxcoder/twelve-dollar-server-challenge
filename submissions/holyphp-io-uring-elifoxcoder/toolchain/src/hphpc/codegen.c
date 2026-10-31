@@ -1164,6 +1164,9 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
      * sides. Falls through to the hval ABI for anything else. */
     {
         static const struct { const char *name; const char *params; char ret; } T[] = {
+            {"iarr_new",          "i",   'i'},
+            {"iarr_get",          "ii",  'i'},
+            {"iarr_set",          "iii", 'b'},
             {"sb_new",           "",    'i'},
             {"sb_reserve",       "ii",  'b'},
             {"sb_put",           "is",  'b'},

@@ -5012,6 +5012,51 @@ hval hpbi_str_from_bytes(hval ptr, hval len) {
     if (!p || n < 0) return hp_of_str(hp_null_str());
     return hp_of_str(hp_str_new(p, (size_t)n));
 }
+/* Fixed-size int64 array indexed directly, for per-connection state keyed by
+ * fd. A hash map of boxed hvals costs a probe plus a 16-byte key and value per
+ * entry; this is 8 bytes per slot and one pointer add. 0 means "absent". */
+typedef struct { int64_t *v; int64_t cap; } hp_iarr_t;
+
+static hp_iarr_t *iarr_of(hval h) { return (hp_iarr_t *)(intptr_t)hp_val_to_int(h); }
+
+hval hpbi_iarr_new(hval size) {
+    int64_t n = hp_val_to_int(size);
+    if (n < 1) n = 1;
+    hp_iarr_t *a = (hp_iarr_t *)hp_alloc(sizeof *a);
+    a->cap = n;
+    a->v = (int64_t *)hp_alloc(sizeof(int64_t) * (size_t)n);
+    return hp_of_int((int64_t)(intptr_t)a);
+}
+hval hpbi_iarr_get(hval h, hval i) {
+    hp_iarr_t *a = iarr_of(h);
+    int64_t k = hp_val_to_int(i);
+    if (!a || k < 0 || k >= a->cap) return hp_of_int(0);
+    return hp_of_int(a->v[k]);
+}
+hval hpbi_iarr_set(hval h, hval i, hval v) {
+    hp_iarr_t *a = iarr_of(h);
+    int64_t k = hp_val_to_int(i);
+    if (a && k >= 0 && k < a->cap) a->v[k] = hp_val_to_int(v);
+    return hp_of_bool(true);
+}
+int64_t hp_iarr_new_t(int64_t n) {
+    if (n < 1) n = 1;
+    hp_iarr_t *a = (hp_iarr_t *)hp_alloc(sizeof *a);
+    a->cap = n;
+    a->v = (int64_t *)hp_alloc(sizeof(int64_t) * (size_t)n);
+    return (int64_t)(intptr_t)a;
+}
+int64_t hp_iarr_get_t(int64_t h, int64_t k) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)h;
+    if (!a || k < 0 || k >= a->cap) return 0;
+    return a->v[k];
+}
+bool hp_iarr_set_t(int64_t h, int64_t k, int64_t v) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)h;
+    if (a && k >= 0 && k < a->cap) a->v[k] = v;
+    return true;
+}
+
 hval hpbi_sb_take(hval h) {
     HpSb *s = sb_h(h);
     char *p = hbuf_take(&s->b);

@@ -276,10 +276,14 @@ class Server {
     pub int $start = 0;
     pub int $sweep = 0;
 
-    /* per-connection state, keyed by socket fd */
-    pub array $socks = [];
+    /* per-connection state, keyed by socket fd. socks/lasts are fixed-size
+     * int64 arrays indexed by fd (8 bytes a slot, one pointer add) instead of
+     * hash maps of boxed hvals: at 15k connections the maps' cache footprint
+     * was the floor's biggest cost. 0 means "absent". */
+    pub int $socks = 0;
+    pub int $lasts = 0;
+    pub int $nconn = 0;
     pub array $bufs = [];
-    pub array $lasts = [];
 
     /* deferred writes for the current poll cycle */
     pub array $pending = [];
@@ -436,6 +440,8 @@ class Server {
 
         $this->srv = intval($srv);
         epoll_add($this->srv);
+        $this->socks = iarr_new(65536);
+        $this->lasts = iarr_new(65536);
 
         /* Shed only when the process is really near its descriptor limit.
          * The box sets LimitNOFILE; a hard 58,000 would close every response
@@ -471,7 +477,7 @@ class Server {
         foreach ($this->ready as $h) {
             $fd = intval($h);
             if ($fd == $this->srv) { $this->accept_all(); continue; }
-            if (!isset($this->socks[$fd])) { continue; }
+            if (!(iarr_get($this->socks, $fd) != 0)) { continue; }
             if (isset($this->out[$fd])) { continue; }   /* write still pending */
             $this->read_fd($fd);
         }
@@ -538,9 +544,10 @@ class Server {
             $fd = intval($s);
             if ($fd <= 0) { return; }
             stream_set_nodelay($fd);
-            $this->socks[$fd] = $fd;
+            iarr_set($this->socks, $fd, $fd);
             $this->bufs[$fd] = "";
-            $this->lasts[$fd] = time();
+            iarr_set($this->lasts, $fd, time());
+            $this->nconn = $this->nconn + 1;
             $this->sockList[] = $fd;
             epoll_add($fd);
         }
@@ -564,29 +571,34 @@ class Server {
             $fd = $this->sockList[$this->sweepPos];
             $this->sweepPos = $this->sweepPos + 1;
             $budget = $budget - 1;
-            if (!isset($this->socks[$fd])) { continue; }
-            if ($now - $this->lasts[$fd] >= 90) { $this->close_fd($fd); }
+            if (!(iarr_get($this->socks, $fd) != 0)) { continue; }
+            if ($now - iarr_get($this->lasts, $fd) >= 90) { $this->close_fd($fd); }
         }
         if ($this->sweepPos >= $n) {
             $this->sweepPos = 0;
             /* compact once the list is mostly tombstones */
-            if ($n > count($this->socks) * 2 + 1024) {
+            if ($n > $this->nconn * 2 + 1024) {
                 $this->sockList = [];
-                foreach ($this->socks as $fd) { $this->sockList[] = $fd; }
+                $k = 0;
+                while ($k < 65536) {
+                    if (iarr_get($this->socks, $k) != 0) { $this->sockList[] = $k; }
+                    $k = $k + 1;
+                }
             }
         }
     }
 
     public function close_fd(int $fd): void {
-        unset($this->socks[$fd]);
+        if (iarr_get($this->socks, $fd) != 0) { $this->nconn = $this->nconn - 1; }
+        iarr_set($this->socks, $fd, 0);
         unset($this->bufs[$fd]);
-        unset($this->lasts[$fd]);
+        iarr_set($this->lasts, $fd, 0);
         unset($this->out[$fd]);
         unset($this->closing[$fd]);
         epoll_del($fd);
         stream_close($fd);
         /* room again: watch the listener */
-        if ($this->paused == 1 && count($this->socks) < $this->shedAt) {
+        if ($this->paused == 1 && $this->nconn < $this->shedAt) {
             $this->paused = 0;
             epoll_add($this->srv);
         }
@@ -603,7 +615,7 @@ class Server {
         /* $this->bufs[$fd] is "" (static) or a heap copy of a partial
          * request; the concatenation lives in the request scope and is
          * either consumed here or copied back with str_persist(). */
-        $this->lasts[$fd] = time();
+        iarr_set($this->lasts, $fd, time());
         $old = $this->bufs[$fd];
         if ($old == "") {
             /* the common case: a whole request in one recv, no copy at all */
@@ -651,7 +663,7 @@ class Server {
                 } else {
                     $this->send_json($fd, 404, '{"error":"not found"}');
                 }
-                if (!isset($this->socks[$fd])) { return; }
+                if (!(iarr_get($this->socks, $fd) != 0)) { return; }
                 $buf = substr($buf, $he + 4);
                 if ($buf == "") { return; }
                 continue;
@@ -693,7 +705,7 @@ class Server {
             $buf = substr($buf, $start + $cl);
 
             $this->dispatch($fd, $method, $path, $auth, $body);
-            if (!isset($this->socks[$fd])) { return; }
+            if (!(iarr_get($this->socks, $fd) != 0)) { return; }
         }
     }
 
@@ -1282,7 +1294,7 @@ class Server {
          * really running out of descriptors: the limit is read once at
          * startup (getrlimit), so a box with a higher LimitNOFILE keeps
          * every connection instead of closing one per response. */
-        $shed = count($this->socks) >= $this->shedAt;
+        $shed = $this->nconn >= $this->shedAt;
         $blen = strlen($body);
         /* The status line and the fixed headers are prebuilt per code, so a
          * response costs three concatenations instead of ten. */
