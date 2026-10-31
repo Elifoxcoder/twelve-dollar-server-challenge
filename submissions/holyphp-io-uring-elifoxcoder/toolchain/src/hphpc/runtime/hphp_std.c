@@ -2345,11 +2345,14 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_ENTER_GET   1
 /* IORING_ENTER_EXT_ARG is bit 3 (verified against io_uring.h + the probe) */
 #define HP_UR_ENTER_EXT   8
+/* IORING_SETUP_CQSIZE = bit 3, IORING_SETUP_CLAMP = bit 4 (uapi io_uring.h) */
+#define HP_UR_SETUP_CQSIZE (1U << 3)
+#define HP_UR_SETUP_CLAMP   (1U << 4)
 #define HP_UR_KIND_RECV   1
 #define HP_UR_KIND_SEND   2
 #define HP_UR_KIND_POLL   3
 #define HP_UR_KIND        0xff
-#define HP_UR_ENTRIES     32768   /* SQ ring entries (CQ is doubled by kernel) */
+#define HP_UR_ENTRIES     65536   /* deep ring: ~60k + live conns at 280k users */
 #define HP_UR_RECV_LEN    4096
 
 /* raw ABI, from include/uapi/linux/io_uring.h */
@@ -2415,6 +2418,10 @@ struct hp_urfds {
     int    listener;
     int    pollarmed;
     int    sarmed;                        /* a send SQE is queued or in flight */
+    int    rtagged;                       /* parked in the retry ring */
+    int    closeafter;                    /* close deferred until sends drain */
+    int    ctagged;                       /* listed for the deadline check */
+    int64_t cdeadline;
     uint32_t epoch;
 };
 
@@ -2429,8 +2436,12 @@ static _Thread_local uint32_t hp_ur_sqtail, hp_ur_cqhead;
 static _Thread_local uint32_t hp_ur_sqmask, hp_ur_cqmask;
 static _Thread_local struct hp_urfds *hp_ur_fds;
 static _Thread_local uint32_t hp_ur_fdscap;
-static _Thread_local int hp_ur_pushfail;    /* submits that hit a full ring */
+static _Thread_local int hp_ur_pushfail;    /* retry-ring overflow: run scan */
 static _Thread_local int hp_ur_dbg;         /* HPHP_URING_DEBUG=1 */
+static _Thread_local uint32_t *hp_ur_retry; /* fds waiting for a re-arm slot */
+static _Thread_local uint32_t hp_ur_retcap, hp_ur_rethead, hp_ur_rettail;
+static _Thread_local uint32_t *hp_ur_closing; /* fds waiting for a send drain */
+static _Thread_local uint32_t hp_ur_closecap, hp_ur_closecnt;
 
 static int hp_uring_active(void) { return hp_ur_st == 1; }
 
@@ -2453,6 +2464,42 @@ static void hp_ur_fdgrow(hp_sock fd) {
     memset(nf + hp_ur_fdscap, 0, (size_t)(ncap - hp_ur_fdscap) * sizeof *nf);
     hp_ur_fds = nf;
     hp_ur_fdscap = ncap;
+    /* keep the retry ring at least as wide as the fd table: one slot per
+     * connection so a fully saturated ring still tracks every pending fd */
+    if (ncap > hp_ur_retcap) {
+        uint32_t *nr = (uint32_t *)malloc((size_t)ncap * sizeof *nr);
+        if (!nr) { hp_ur_pushfail++; return; }
+        uint32_t n = 0;
+        for (uint32_t k = hp_ur_rethead; k != hp_ur_rettail;
+             k = (k + 1) & (hp_ur_retcap - 1))
+            nr[n++] = hp_ur_retry[k];
+        free(hp_ur_retry);
+        hp_ur_retry = nr;
+        hp_ur_rethead = 0;
+        hp_ur_rettail = n;
+        hp_ur_retcap = ncap;
+    }
+    if (ncap > hp_ur_closecap) {
+        uint32_t *nc = (uint32_t *)realloc(hp_ur_closing,
+                                           (size_t)ncap * sizeof *nc);
+        if (nc) { hp_ur_closing = nc; hp_ur_closecap = ncap; }
+    }
+}
+
+/* An fd whose SQE push hit a full ring parks here and is re-armed after the
+ * next CQE drain, when slots have freed up. At the multi-10k-connection
+ * scale each idle connection parks one recv SQE while the kernel caps the
+ * SQ ring at 32768 entries, so per-cycle full-table scans would otherwise
+ * burn measurable CPU; this stays O(pending). */
+static void hp_ur_retfd(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (st && st->rtagged) return;
+    if (st) st->rtagged = 1;
+    if (!hp_ur_retcap) { hp_ur_pushfail++; return; }
+    uint32_t nt = (hp_ur_rettail + 1) & (hp_ur_retcap - 1);
+    if (nt == hp_ur_rethead) { hp_ur_pushfail++; return; }   /* ring full */
+    hp_ur_retry[hp_ur_rettail] = (uint32_t)fd;
+    hp_ur_rettail = nt;
 }
 
 static void hp_ur_drop_send_chain(struct hp_urfds *st) {
@@ -2462,12 +2509,53 @@ static void hp_ur_drop_send_chain(struct hp_urfds *st) {
     st->squeued = 0;
 }
 
+static long hp_ur_enter(long to_submit, long min_complete, int wait_ms);
+static bool hp_ur_arm_send_head(hp_sock fd);
+static void hp_ur_free_fd(hp_sock fd);
+
+/* The app asked to close an fd while a SEND is still queued in the ring.
+ * The bytes have not reached the kernel yet, so closing now would cancel the
+ * response (exactly what the shed path does: write_response closes the fd
+ * right after stream_send2_nb reports "sent"). Leave the SQE queued -- the
+ * next enter submits it with everything else -- and keep the state, and with
+ * it the buffers the kernel reads from, alive until the chain drains;
+ * hp_uring_wait finishes the close. */
+static void hp_ur_finish_close(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st) return;
+    st->ctagged = 0;
+    st->closeafter = 0;
+    st->sarmed = 0;                /* nothing may defer the close again */
+    sock_forget((intptr_t)fd);
+    close(fd);                     /* cancels any in-flight op first */
+    hp_ur_drop_send_chain(st);
+    hp_ur_free_fd(fd);
+}
+
 /* Drop everything the ring still references for an fd. The kernel cancels
  * in-flight SQEs on file release; completions that still arrive are dropped
  * by the epoch in user_data. */
 static void hp_ur_free_fd(hp_sock fd) {
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st) return;
+    if (!st->listener && (st->sarmed || st->shead)) {
+        if (!st->sarmed) hp_ur_arm_send_head(fd);
+        /* The send SQE is already queued; the next wait cycle submits it
+         * together with everything else. Only the close has to wait. */
+        st->closeafter = 1;
+        st->cdeadline = (int64_t)time(NULL) + 15;
+        if (!st->ctagged) {
+            if (hp_ur_closecnt < hp_ur_closecap) {
+                st->ctagged = 1;
+                hp_ur_closing[hp_ur_closecnt++] = (uint32_t)fd;
+                return;
+            }
+            /* no tracking room: close now (bounded, never leaks) */
+            st->closeafter = 0;
+        } else {
+            return;
+        }
+    }
     hp_ur_drop_send_chain(st);
     free(st->rbuf);
     uint32_t e = st->epoch + 1;          /* keep escalating so fd-reuse
@@ -2498,8 +2586,24 @@ static bool hp_uring_setup(void) {
     hp_ur_dbg = getenv("HPHP_URING_DEBUG") != NULL;
     struct hp_uring_setup_params p;
     memset(&p, 0, sizeof p);
-    int fd = (int)syscall(SYS_io_uring_setup, (unsigned long)HP_UR_ENTRIES, &p);
-    if (fd < 0) return false;
+    /* Ask for an explicit 64k/64k ring: at 280k users the box holds ~60k
+     * live connections and every armed poll/recv/send occupies an SQE slot,
+     * so the default 32k SQ ring would start rejecting pushes at the very
+     * scale the bench measures. CQSIZE requests the CQ depth (the uapi
+     * requires cq_entries >= sq_entries), CLAMP lets a kernel with a lower
+     * sq cap shrink that side and keep the deep CQ. Total ~5.3 MB entered
+     * under the default 8 MB RLIMIT_MEMLOCK; any failure falls back to the
+     * classic 32k defaults (~3.2 MB). */
+    p.sq_entries = HP_UR_ENTRIES;
+    p.cq_entries = HP_UR_ENTRIES;
+    p.flags = HP_UR_SETUP_CQSIZE | HP_UR_SETUP_CLAMP;
+    int fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
+    if (fd < 0) {
+        memset(&p, 0, sizeof p);
+        fd = (int)syscall(SYS_io_uring_setup,
+                          (unsigned long)(HP_UR_ENTRIES / 2), &p);
+        if (fd < 0) return false;
+    }
     size_t sq_sz = p.sq_off.array + (size_t)p.sq_entries * sizeof(uint32_t);
     size_t cq_sz = p.cq_off.cqes + (size_t)p.cq_entries * sizeof(struct hp_uring_cqe);
     size_t sqe_sz = (size_t)p.sq_entries * sizeof(struct hp_uring_sqe);
@@ -2546,8 +2650,7 @@ static bool hp_ur_sq_push(struct hp_uring_sqe *fill) {
     uint32_t tail = hp_ur_sqtail;
     uint32_t head = __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE);
     if (tail - head >= (uint32_t)(hp_ur_sqmask + 1)) {
-        hp_ur_pushfail++;
-        return false;
+        return false;   /* no slot: the fd is parked in the retry ring */
     }
     struct hp_uring_sqe *slot = (struct hp_uring_sqe *)
         (hp_ur_sqes + (size_t)(tail & hp_ur_sqmask) * sizeof(struct hp_uring_sqe));
@@ -2588,7 +2691,7 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     s.addr = (uint64_t)(uintptr_t)st->rbuf;
     s.len = (uint32_t)st->rcap;
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_RECV);
-    if (!hp_ur_sq_push(&s)) return false;
+    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
     st->rarmed = 1;
     return true;
 }
@@ -2602,7 +2705,7 @@ static bool hp_uring_arm_poll(hp_sock fd) {
     s.fd = (int)fd;
     s.poll_events = POLLIN;
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_POLL);
-    if (!hp_ur_sq_push(&s)) return false;
+    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
     st->pollarmed = 1;
     return true;
 }
@@ -2618,7 +2721,7 @@ static bool hp_ur_arm_send_head(hp_sock fd) {
     s.addr = (uint64_t)(uintptr_t)(c->data + c->off);
     s.len = (uint32_t)(c->len - c->off);
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_SEND);
-    if (!hp_ur_sq_push(&s)) return false;
+    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
     st->sarmed = 1;
     return true;
 }
@@ -2634,7 +2737,9 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
     if (!st || st->reof) return -2;
     if (st->squeued >= 64) {                       /* a stalled peer */
         st->reof = 1;
-        hp_ur_drop_send_chain(st);
+        /* keep the chain: the head may still be in flight, so freeing it
+         * here would let the kernel read freed memory. The completion (or
+         * the deferred close) drops it. */
         return -2;
     }
     size_t n = a->len + b->len;
@@ -2700,6 +2805,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         if (!st || st->epoch != epoch) continue;   /* closed + reused fd */
         if (kind == HP_UR_KIND_RECV) {
             st->rarmed = 0;
+            if (st->closeafter) continue;   /* app already closed: ignore */
             if (c->res > 0) {
                 st->rlen = (size_t)c->res;
                 st->rready = 1;
@@ -2713,52 +2819,123 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             }
         } else if (kind == HP_UR_KIND_POLL) {
             st->pollarmed = 0;
-            if (c->res == -ECANCELED || c->res == -EBADF) continue;
-            if (c->res & POLLIN) {
+            if (st->closeafter) continue;   /* app already closed: ignore */
+            if (c->res < 0 && (c->res == -ECANCELED || c->res == -EBADF))
+                continue;
+            /* the completion res is the event mask (positive) only when the
+             * poll succeeded; a negative res must not arm-ready the fd */
+            if (c->res > 0 && (c->res & POLLIN)) {
                 if (in) hp_arr_push(in, hp_of_int(fd));
                 hp_uring_arm_poll(fd);             /* keep watching */
+            } else if (c->res <= 0) {
+                /* the poll died: surface the fd so the owner closes it */
+                st->reof = 1;
+                if (in) hp_arr_push(in, hp_of_int(fd));
             }
         } else {
             st->sarmed = 0;
             struct hp_urchunk *c2 = st->shead;
-            if (!c2) continue;
-            if (c->res >= 0) {
-                c2->off += (size_t)c->res;
-                if (c2->off >= c2->len) {
-                    st->shead = c2->next;
-                    if (!st->shead) st->stail = NULL;
-                    st->squeued--;
-                    free(c2->data);
-                    free(c2);
+            if (c2) {
+                if (c->res >= 0) {
+                    c2->off += (size_t)c->res;
+                    if (c2->off >= c2->len) {
+                        st->shead = c2->next;
+                        if (!st->shead) st->stail = NULL;
+                        st->squeued--;
+                        free(c2->data);
+                        free(c2);
+                    }
+                } else if (c->res != -ECANCELED && c->res != -EBADF &&
+                           c->res != -EAGAIN && c->res != -EINTR) {
+                    /* EPIPE / ECONNRESET: the peer died mid-response */
+                    st->reof = 1;
+                    if (in) hp_arr_push(in, hp_of_int(fd));
+                    hp_ur_drop_send_chain(st);
                 }
-            } else if (c->res != -ECANCELED && c->res != -EBADF &&
-                       c->res != -EAGAIN && c->res != -EINTR) {
-                /* EPIPE / ECONNRESET: the peer died mid-response */
-                st->reof = 1;
-                if (in) hp_arr_push(in, hp_of_int(fd));
-                hp_ur_drop_send_chain(st);
+                if (!st->reof) hp_ur_arm_send_head(fd);
             }
-            if (!st->reof) hp_ur_arm_send_head(fd);
+            if (st->closeafter) {
+                if (!st->shead) hp_ur_finish_close(fd);
+                continue;
+            }
         }
         /* keep this fd's pipeline flowing for the next cycle */
-        if (!st->reof && !st->listener && !st->rready && !st->rarmed)
+        if (!st->reof && !st->closeafter && !st->listener &&
+            !st->rready && !st->rarmed)
             hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
     }
     __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
     hp_ur_cqhead = head;
-    /* a submit that hit a full ring would otherwise leave its fd silent
-     * forever (no armed SQE means no completion means no retry): scan the
-     * fd table once. In the common case the flag is 0 and this costs
-     * nothing. */
+    /* an fd whose SQE push hit a full ring is parked in the retry ring and
+     * re-armed here, after the CQE drain freed slots up. In the common case
+     * the ring is empty and this costs nothing; the rare overflow flag
+     * falls back to one full fd-table scan. */
+    while (hp_ur_rethead != hp_ur_rettail) {
+        uint32_t i = hp_ur_retry[hp_ur_rethead];
+        hp_ur_rethead = (hp_ur_rethead + 1) & (hp_ur_retcap - 1);
+        if (i >= hp_ur_fdscap) continue;
+        struct hp_urfds *st = &hp_ur_fds[i];
+        if (!st->rtagged) continue;              /* already handled */
+        st->rtagged = 0;
+        if (st->reof) continue;
+        if (st->closeafter) {
+            if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
+                hp_ur_retfd((hp_sock)i);
+            continue;
+        }
+        if (st->listener) { if (!hp_uring_arm_poll((hp_sock)i)) hp_ur_retfd((hp_sock)i); continue; }
+        if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
+            hp_ur_retfd((hp_sock)i);
+        if (st->rbuf && !st->rready && !st->rarmed &&
+            !hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN))
+            hp_ur_retfd((hp_sock)i);
+    }
+    /* deferred closes: the send chain drained (or the peer is gone for
+     * good) -> close the fd for real. Entries live until then, bounded by
+     * the deadline so a stalled peer cannot pin descriptors forever. */
+    if (hp_ur_closecnt) {
+        uint32_t n = 0;
+        int64_t now = (int64_t)time(NULL);
+        for (uint32_t k = 0; k < hp_ur_closecnt; k++) {
+            uint32_t i = hp_ur_closing[k];
+            if (i >= hp_ur_fdscap) continue;
+            struct hp_urfds *st = &hp_ur_fds[i];
+            if (!st->ctagged) continue;
+            if (st->closeafter && !st->shead) {
+                hp_ur_finish_close((hp_sock)i);
+                continue;
+            }
+            if (!st->closeafter) { st->ctagged = 0; continue; }
+            if (now >= st->cdeadline) {
+                hp_ur_finish_close((hp_sock)i);
+                continue;
+            }
+            hp_ur_closing[n++] = i;
+        }
+        hp_ur_closecnt = n;
+    }
     if (hp_ur_pushfail) {
         hp_ur_pushfail = 0;
         for (uint32_t i = 0; i < hp_ur_fdscap; i++) {
             struct hp_urfds *st = &hp_ur_fds[i];
-            if (st->reof || st->listener) continue;
-            if (st->shead && !st->sarmed) hp_ur_arm_send_head((hp_sock)i);
-            if (st->rbuf && !st->rready && !st->rarmed)
-                hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN);
+            st->rtagged = 0;
+            if (st->reof) continue;
+            if (st->closeafter) {
+                if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
+                    hp_ur_retfd((hp_sock)i);
+                continue;
+            }
+            if (st->listener) {
+                if (!hp_uring_arm_poll((hp_sock)i)) hp_ur_retfd((hp_sock)i);
+                continue;
+            }
+            if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
+                hp_ur_retfd((hp_sock)i);
+            if (st->rbuf && !st->rready && !st->rarmed &&
+                !hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN))
+                hp_ur_retfd((hp_sock)i);
         }
+        hp_ur_rethead = hp_ur_rettail = 0;
     }
     (void)out;
 }
@@ -2981,7 +3158,14 @@ hval hpbi_stream_peer(hval s) {
 hval hpbi_stream_close(hval s) {
     hp_sock fd = sock_of(s);
 #ifdef HP_UR_CAN
-    if (hp_uring_active()) hp_ur_free_fd(fd);
+    if (hp_uring_active()) {
+        struct hp_urfds *st = hp_ur_st_of(fd);
+        /* a send is still in flight: hp_ur_free_fd defers the real close
+         * until the kernel has taken the bytes (see hp_ur_finish_close) */
+        if (st && st->closeafter) return hp_of_bool(true);
+        hp_ur_free_fd(fd);
+        if (st && st->closeafter) return hp_of_bool(true);
+    }
 #endif
     if (fd == HP_SOCK_BAD) return hp_of_bool(false);
     hp_sock_graceful_close(fd);

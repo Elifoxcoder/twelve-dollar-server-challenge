@@ -81,8 +81,18 @@ allocation-stable for a long-running server. All of this is generic:
 - **Pointer arithmetic and typed dereference** in the compiler (`ptr + int`,
   `*u8` reads one byte), and a cache key that includes `HPHP_SQLITE_LIB` (a
   cached binary must not silently switch SQLite builds).
+- **io_uring backend behind the network primitives.** When the kernel can
+  create a ring, one `io_uring_enter` per poll cycle replaces `epoll_wait` plus
+  the per-request `recv`/`send` pair: each connection rides one armed
+  `IORING_OP_RECV` with a recycled buffer, listeners ride `IORING_OP_POLL`,
+  responses flush from owned chunks on the next cycle, and per-fd epochs drop
+  completions that arrive after a close. Ring-full pushes park their fd in a
+  retry ring; a queued send defers the close until the kernel has taken the
+  bytes (the `Connection: close` shed path). If the kernel refuses the ring,
+  every primitive falls back to the plain epoll path; `HPHP_URING=0` forces it.
 
-There is no challenge-specific C code and no `io_uring`.
+There is no challenge-specific C code: the backend is generic runtime code the
+same way epoll and the SQLite binding are.
 
 ## Requirements
 
