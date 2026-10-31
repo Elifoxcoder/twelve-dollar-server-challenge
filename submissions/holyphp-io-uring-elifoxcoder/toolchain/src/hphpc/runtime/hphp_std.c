@@ -50,6 +50,7 @@ typedef SOCKET hp_sock;
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -1899,7 +1900,7 @@ static void hp_net_init(void) {
 
 /* Per-socket state. EOF is sticky: once the peer closes, it stays closed
  * even if we stop reading. */
-typedef struct { intptr_t h; bool eof; } hp_sockrec;
+typedef struct { intptr_t h; bool eof; bool listener; } hp_sockrec;
 /* Indexed by descriptor: a server with 15k connections must not pay a linear
  * scan on every recv/send. Slots are grown on demand. */
 static hp_sockrec *g_sock;
@@ -1929,6 +1930,7 @@ static void sock_forget(intptr_t h) {
     if (h < 0 || (size_t)h >= g_sock_cap) return;
     g_sock[h].h = 0;
     g_sock[h].eof = false;
+    g_sock[h].listener = false;
 }
 
 static hp_sock sock_of(hval v) { return (hp_sock)(intptr_t)hp_val_to_int(v); }
@@ -1990,7 +1992,8 @@ hval hpbi_stream_socket_server(hval addr) {
     }
     freeaddrinfo(res);
     sock_nonblocking(s, true);
-    sockrec((intptr_t)s, true);
+    hp_sockrec *sr = sockrec((intptr_t)s, true);
+    if (sr) sr->listener = true;
     return hp_of_int((int64_t)(intptr_t)s);
 }
 
@@ -2025,9 +2028,19 @@ hval hpbi_stream_socket_accept(hval srv) {
     for (;;) {
         struct sockaddr_storage ss;
         socklen_t sl = sizeof ss;
+#if defined(__linux__) && defined(SYS_accept4)
+        /* one syscall: the accepted fd is already non-blocking (plain accept
+         * plus two fcntl round trips would cost two more per connection) */
+        hp_sock c = (hp_sock)syscall(SYS_accept4, s,
+                                     (struct sockaddr *)&ss, &sl,
+                                     (long)O_NONBLOCK);
+#else
         hp_sock c = accept(s, (struct sockaddr *)&ss, &sl);
+#endif
         if (c != HP_SOCK_BAD) {
+#if !defined(__linux__) || !defined(SYS_accept4)
             sock_nonblocking(c, true);
+#endif
             sockrec((intptr_t)c, true);
             g_accept_errno = 0;
             return hp_of_int((int64_t)(intptr_t)c);
@@ -2055,9 +2068,17 @@ hval hpbi_stream_socket_accept2(hval srv, hval timeout_ms) {
     for (;;) {
         struct sockaddr_storage ss;
         socklen_t sl = sizeof ss;
+#if defined(__linux__) && defined(SYS_accept4)
+        hp_sock c = (hp_sock)syscall(SYS_accept4, s,
+                                     (struct sockaddr *)&ss, &sl,
+                                     (long)O_NONBLOCK);
+#else
         hp_sock c = accept(s, (struct sockaddr *)&ss, &sl);
+#endif
         if (c != HP_SOCK_BAD) {
+#if !defined(__linux__) || !defined(SYS_accept4)
             sock_nonblocking(c, true);
+#endif
             sockrec((intptr_t)c, true);
             g_accept_errno = 0;
             return hp_of_int((int64_t)(intptr_t)c);
@@ -2960,8 +2981,17 @@ hval hpbi_epoll_add(hval s) {
         hp_ur_fdgrow(fd);
         struct hp_urfds *st = hp_ur_st_of(fd);
         if (st) {
-            int lt = 0; socklen_t accsl = sizeof lt;
-            getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &lt, &accsl);
+            /* The listener flag is recorded when the socket is created; only
+             * an fd the runtime does not track pays the getsockopt probe
+             * (one syscall per accepted connection would otherwise). */
+            hp_sockrec *sr = sockrec((intptr_t)fd, false);
+            int lt = 0;
+            if (sr) {
+                lt = sr->listener ? 1 : 0;
+            } else {
+                socklen_t accsl = sizeof lt;
+                getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &lt, &accsl);
+            }
             st->listener = (lt == 1);
             if (hp_ur_dbg)
                 fprintf(stderr, "[ur] add fd=%d listener=%d\n", (int)fd, st->listener);
