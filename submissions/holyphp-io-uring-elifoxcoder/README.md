@@ -88,8 +88,12 @@ allocation-stable for a long-running server. All of this is generic:
   responses flush from owned chunks on the next cycle, and per-fd epochs drop
   completions that arrive after a close. Ring-full pushes park their fd in a
   retry ring; a queued send defers the close until the kernel has taken the
-  bytes (the `Connection: close` shed path). If the kernel refuses the ring,
-  every primitive falls back to the plain epoll path; `HPHP_URING=0` forces it.
+  bytes (the `Connection: close` shed path). Because the kernel caps the SQ
+  ring at 32768 entries, the server sizes its keep-alive table to the ring
+  (`uring_active()`): above ~28k live connections the surplus users reconnect
+  per request instead of waiting for an armed-recv slot. If the kernel
+  refuses the ring, every primitive falls back to the plain epoll path;
+  `HPHP_URING=0` forces it.
 
 There is no challenge-specific C code: the backend is generic runtime code the
 same way epoll and the SQLite binding are.

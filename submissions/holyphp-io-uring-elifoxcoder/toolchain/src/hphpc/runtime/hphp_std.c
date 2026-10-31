@@ -2891,7 +2891,14 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
      * re-armed here, after the CQE drain freed slots up. In the common case
      * the ring is empty and this costs nothing; the rare overflow flag
      * falls back to one full fd-table scan. */
-    while (hp_ur_rethead != hp_ur_rettail) {
+    /* Only try as many parked fds as the SQ ring can take right now. With a
+     * full ring every pop would just re-park its entry, which turns this
+     * into an O(parked) loop on every cycle -- and the kernel caps the SQ at
+     * 32768 entries while the box holds up to ~61k connections. Entries we
+     * do not reach stay queued for the next cycle. */
+    uint32_t slots = (hp_ur_sqmask + 1) -
+        (hp_ur_sqtail - __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
+    while (hp_ur_rethead != hp_ur_rettail && slots > 0) {
         uint32_t i = hp_ur_retry[hp_ur_rethead];
         hp_ur_rethead = (hp_ur_rethead + 1) & (hp_ur_retcap - 1);
         if (i >= hp_ur_fdscap) continue;
@@ -2900,16 +2907,26 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         st->rtagged = 0;
         if (st->reof) continue;
         if (st->closeafter) {
-            if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
-                hp_ur_retfd((hp_sock)i);
+            if (st->shead && !st->sarmed) {
+                if (hp_ur_arm_send_head((hp_sock)i)) slots--;
+                else hp_ur_retfd((hp_sock)i);
+            }
             continue;
         }
-        if (st->listener) { if (!hp_uring_arm_poll((hp_sock)i)) hp_ur_retfd((hp_sock)i); continue; }
-        if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
-            hp_ur_retfd((hp_sock)i);
-        if (st->rbuf && !st->rready && !st->rarmed &&
-            !hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN))
-            hp_ur_retfd((hp_sock)i);
+        if (st->listener) {
+            if (hp_uring_arm_poll((hp_sock)i)) slots--;
+            else hp_ur_retfd((hp_sock)i);
+            continue;
+        }
+        if (st->shead && !st->sarmed) {
+            if (hp_ur_arm_send_head((hp_sock)i)) slots--;
+            else hp_ur_retfd((hp_sock)i);
+        }
+        if (slots == 0) { hp_ur_retfd((hp_sock)i); continue; }  /* recv next cycle */
+        if (st->rbuf && !st->rready && !st->rarmed) {
+            if (hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN)) slots--;
+            else hp_ur_retfd((hp_sock)i);
+        }
     }
     /* deferred closes: the send chain drained (or the peer is gone for
      * good) -> close the fd for real. Entries live until then, bounded by
@@ -6017,6 +6034,17 @@ int64_t hp_nofile_limit_t(void) {
     return (int64_t)rl.rlim_cur;
 #endif
 }
+
+/* Whether the io_uring backend actually came up. Generic: a program can size
+ * its own connection table to the backend's real capacity. */
+bool hp_uring_active_t(void) {
+#ifdef HP_UR_CAN
+    return hp_uring_active();
+#else
+    return false;
+#endif
+}
+hval hpbi_uring_active(void) { return hp_of_bool(hp_uring_active_t()); }
 
 /* ---- typed fast paths for the request/parse and SQLite calls ---- */
 

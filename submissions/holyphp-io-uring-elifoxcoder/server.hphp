@@ -451,6 +451,12 @@ class Server {
             $this->shedAt = $lim - 4096;
             if ($this->shedAt < 32000) { $this->shedAt = 32000; }
             if ($this->shedAt > $lim) { $this->shedAt = $lim; }
+            /* The ring backend parks one armed recv per connection and the
+             * kernel caps the SQ ring at 32768 entries. Above ~28k live
+             * connections the surplus would wait for a slot before their
+             * requests are even read, so shed earlier: the extra users
+             * reconnect per request instead and stay fast. */
+            if (uring_active() && $this->shedAt > 28000) { $this->shedAt = 28000; }
         }
 
         $codes = [200, 201, 400, 401, 404, 500, 503];
