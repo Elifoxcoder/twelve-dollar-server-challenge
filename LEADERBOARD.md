@@ -35,7 +35,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 1 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
 | 1 | c-rawsqlite-larvance | #210 | C (io_uring, own SQLite-format engine, no libsqlite3) | **280,000** | 26,769 | 8.6 | 23.5 | 0.00 | 74 | 25 | 1,429 | 2026-10-30 |
 | 3 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 3 | ada-native-visseranalytics | #216 | Ada (GNAT, io_uring) | **270,000** | 25,824 | 170 | 405 | 0.00 | 86 | 30 | 1,064 | 2026-10-30 |
+| 3 | ada-native-visseranalytics | #216 | Ada (GNAT, io_uring) | **270,000** ᵇ | 25,824 | 170 | 405 | 0.00 | 86 | 30 | 1,064 | 2026-10-30 |
 | 5 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **266,000** | 25,525 | 17 | 113 | 0.00 | 70 | 25 | 1,206 | 2026-10-30 |
 | 6 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 7 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
@@ -206,6 +206,11 @@ stays on #113's merged code until #191 is merged.
 **130,000** (12,618 req/s, p95 374 / p99 529 ms, 0 % err, 93 % CPU, 69 µs/req, 334 MB, 2026-10-31). CPU-bound:
 135,000 and 140,000 failed the 2-minute probe on p99 (0 errors). Earlier heads: `c935dfe` scored 64,000 (timeouts at
 ~70 % CPU) and `96aa4f5` scored 110,000 on 2026-10-30. The row above stays on #204's merged code until #213 is merged.
+
+ᵇ **Ada #216's follow-up #223** (`5eebfe2`, SQLite B-tree reads; held, not merged: see the rule flags) scored
+**257,000** (24,749 req/s, p95 22.8 / p99 151 ms, 0 err, 72 % CPU, 26 µs/req, 541 MB, 2026-10-31). 270,000 passed the
+2-minute probe but failed the 5-minute hold on p99 (1.89 s, 0 errors, 80 % CPU); 280,000 failed the 2-minute probe on
+p99. The row above stays on #216's merged code (270,000).
 
 ᶠ **The 65,535 file-descriptor limit, not speed.** These twenty-one serve 65,535 keep-alive users and the rest wait in the
 listen queue until mload's 60 s timeout. Each scored run shows exactly ~21,900 timeouts = 0.93 % of requests, just under the
@@ -394,6 +399,10 @@ committed in this repo.
   `#include`s the unmodified SQLite amalgamation, like lean-derive #153; the plan turns itself off when another
   connection writes, so with 5 worker processes most reads go through SQL; writes use SQL). Scored as submitted (135k
   at `13151f2`); held open for Arjay (rules 2/3 question).
+- **ada-native-visseranalytics's follow-up #223** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors
+  (`src/sqlite_btree.c` `#include`s the unmodified SQLite amalgamation, like lean-derive #153; SQL fallback, enabled
+  only on an exact schema match; writes use SQL). Scored as submitted (257k at `5eebfe2`, footnote ᵇ); held open for
+  Arjay (rules 2/3 question).
 - **python-pyrustapi #147 serves its reads from the `pyrustapi` package's native SQL tier** (`sql=` route options),
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
