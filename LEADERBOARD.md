@@ -48,7 +48,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 13 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
 | 13 | c-iouring-shivanshthapliyal | #214 | C (io_uring) | **238,000** | 22,803 | 425 | 699 | 0.00 | 80 | 32 | 613 | 2026-10-30 |
 | 15 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 16 | c-iouring-moneebullah25 | #203 | C (io_uring) | **230,000** | 22,377 | 9.3 | 37 | 0.00 | 66 | 27 | 1,106 | 2026-10-30 |
+| 16 | c-iouring-moneebullah25 | #203 | C (io_uring) | **230,000** ᶜ | 22,377 | 9.3 | 37 | 0.00 | 66 | 27 | 1,106 | 2026-10-30 |
 | 16 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
 | 18 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
 | 19 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
@@ -215,6 +215,12 @@ until #227 is merged.
 **257,000** (24,749 req/s, p95 22.8 / p99 151 ms, 0 err, 72 % CPU, 26 µs/req, 541 MB, 2026-10-31). 270,000 passed the
 2-minute probe but failed the 5-minute hold on p99 (1.89 s, 0 errors, 80 % CPU); 280,000 failed the 2-minute probe on
 p99. The row above stays on #216's merged code (270,000).
+
+ᶜ **c-iouring-moneebullah25 #203's follow-up #228** (`f07f17f`, SQLite B-tree reads; held, not merged: see the rule
+flags) scored **228,000** (22,144 req/s, p95 41 / p99 62 ms, 0 err, 62 % CPU, 26 µs/req, 1,497 MB, 2026-10-31).
+240,000 passed the 2-minute probe but failed the 5-minute hold with 70 % errors, nearly all `connection refused` from
+mid-hold on (the app stopped accepting); 250k–320k 2-minute probes failed the same way. The row above stays on #203's
+merged code (230,000).
 
 ᶠ **The 65,535 file-descriptor limit, not speed.** These twenty-one serve 65,535 keep-alive users and the rest wait in the
 listen queue until mload's 60 s timeout. Each scored run shows exactly ~21,900 timeouts = 0.93 % of requests, just under the
@@ -400,6 +406,9 @@ committed in this repo.
 - **crystal-rayo's follow-up #218** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`src/native.c`
   built against the pinned SQLite amalgamation, like lean-derive #153; writes use SQL). Scored as submitted (200k at
   `15b3d62`, footnote ʳ); held open for Arjay (rules 2/3 question).
+- **c-iouring-moneebullah25's follow-up #228** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors
+  (`src/db_btree.c` `#include`s the SQLite amalgamation, like lean-derive #153; SQL fallback, `DB_READS=sql` turns it
+  off; writes use SQL). Scored as submitted (228k at `f07f17f`, footnote ᶜ); held open for Arjay (rules 2/3 question).
 - **rust-native-M3M0KA #222** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`sqlite_shim.c`
   `#include`s the unmodified SQLite amalgamation, like lean-derive #153; the plan turns itself off when another
   connection writes, so with 5 worker processes most reads go through SQL; writes use SQL). Scored as submitted (135k
