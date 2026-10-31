@@ -199,11 +199,10 @@ earlier attempt at `0ed86bf` hit the 1-hour install timeout). 270,000 passed the
 hold with 60 % errors, nearly all `connection refused` from mid-hold on (the app stopped accepting). The row above
 stays on #113's merged code until #191 is merged.
 
-ᵘ **HolyPHP #204's follow-up #213** (`c935dfe`, SQLite B-tree reads; held, not merged: see the rule flags) scored
-**64,000** (6,094 req/s, p95 83 / p99 183 ms, 0.47 % err, 70 % CPU, 107 µs/req, 213 MB, 2026-10-31). The limit is
-timeouts, not latency: 67,000 and 70,000 failed the 5-minute hold with 1.0 % / 1.5 % errors (`GET /feed` timeouts at
-~70 % CPU). The earlier head `96aa4f5` scored 110,000 on 2026-10-30. The row above stays on #204's merged code until
-#213 is merged.
+ᵘ **HolyPHP #204's follow-up #213** (`8ee9c5a`, SQLite B-tree reads; held, not merged: see the rule flags) scored
+**130,000** (12,618 req/s, p95 374 / p99 529 ms, 0 % err, 93 % CPU, 69 µs/req, 334 MB, 2026-10-31). CPU-bound:
+135,000 and 140,000 failed the 2-minute probe on p99 (0 errors). Earlier heads: `c935dfe` scored 64,000 (timeouts at
+~70 % CPU) and `96aa4f5` scored 110,000 on 2026-10-30. The row above stays on #204's merged code until #213 is merged.
 
 ᶠ **The 65,535 file-descriptor limit, not speed.** These twenty-one serve 65,535 keep-alive users and the rest wait in the
 listen queue until mload's 60 s timeout. Each scored run shows exactly ~21,900 timeouts = 0.93 % of requests, just under the
@@ -377,7 +376,7 @@ committed in this repo.
   195k at `0e7bc24`); held open for Arjay (rules 1/2/6 question).
 - **holyphp-io-uring's follow-up #213** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors
   (`hp_btree.c` appended to the SQLite amalgamation, like lean-derive #153; feed ordered by `id DESC`; writes use SQL).
-  Scored as submitted (64k at `c935dfe`, 110k at `96aa4f5`, footnote ᵘ); held open for Arjay (rules 2/3 question).
+  Scored as submitted (130k at `8ee9c5a`, 64k at `c935dfe`, 110k at `96aa4f5`, footnote ᵘ); held open for Arjay (rules 2/3 question).
 - **c-uring-curvynes #217** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`sqlite_driver.c`,
   like lean-derive #153; unmodified SQLite amalgamation, SQL fallback; writes use SQL). Scored as submitted (230k at
   `e5a86a3`); held open for Arjay (rules 2/3 question).
