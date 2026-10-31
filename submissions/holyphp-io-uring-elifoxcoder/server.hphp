@@ -439,6 +439,10 @@ class Server {
         $this->btUsers = bt_open($db, "users", 0);
 
         $this->srv = intval($srv);
+        /* TCP_NODELAY is inherited by accepted sockets on Linux, so set it
+         * once on the listener instead of paying a setsockopt per accepted
+         * connection (tens of thousands per second in the shed regime). */
+        stream_set_nodelay($srv);
         epoll_add($this->srv);
         $this->socks = iarr_new(65536);
         $this->lasts = iarr_new(65536);
@@ -549,7 +553,6 @@ class Server {
             }
             $fd = intval($s);
             if ($fd <= 0) { return; }
-            stream_set_nodelay($fd);
             iarr_set($this->socks, $fd, $fd);
             $this->bufs[$fd] = "";
             iarr_set($this->lasts, $fd, time());
