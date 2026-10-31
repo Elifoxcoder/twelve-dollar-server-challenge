@@ -2107,6 +2107,9 @@ hval hpbi_stream_recv(hval s, hval maxn) {
         g_rbuf = nb;
         g_rbuf_cap = (size_t)want;
     }
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_of_str(hp_uring_take_recv(fd, (size_t)want));
+#endif
     char *buf = g_rbuf;
     int r = recv(fd, buf, (int)want, 0);
     bool blocked = (r < 0) && hp_sock_wouldblock();
@@ -2175,6 +2178,9 @@ hval hpbi_stream_send2_nb(hval s, hval a, hval b) {
     if (fd == HP_SOCK_BAD) return hp_of_int(-2);
     hstr *x = hp_val_to_str(a);
     hstr *y = hp_val_to_str(b);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_of_int(hp_uring_send2(fd, x, y));
+#endif
 #if defined(_WIN32)
     /* no writev: one concatenated send (the caller buffers the remainder the
      * same way, the bytes are identical) */
@@ -2311,11 +2317,483 @@ hval hpbi_stream_ready_into(hval outv, hval handles, hval timeout_ms) {
 static _Thread_local int g_epfd = -1;
 #endif
 
+/* ---- io_uring backend (Linux) ----------------------------------------------
+ * Transparent backend behind the epoll/stream primitives. The ring carries one
+ * armed recv per live connection plus the pending response sends, so one
+ * io_uring_enter per poll cycle replaces one epoll_wait plus one recv (and one
+ * send) syscall per request. Built on raw syscalls so nothing depends on
+ * liburing; if the kernel cannot create a ring (no io_uring, or the sandbox
+ * forbids it) every primitive falls back to the epoll path below.
+ * HPHP_URING=0 disables the backend. */
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <sys/mman.h>
+#endif
+#if defined(__linux__) && defined(SYS_io_uring_setup)
+#define HP_UR_CAN 1
+#endif
+
+#ifdef HP_UR_CAN
+
+/* opcode numbers from the IORING_OP_ enum (index from 0): POLL_ADD=6,
+ * SEND=26, RECV=27 — verified against /usr/include/liburing/io_uring.h */
+#define HP_UR_OP_POLL     6
+#define HP_UR_OP_SEND     26
+#define HP_UR_OP_RECV     27
+#define HP_UR_OFF_CQ      0x8000000ULL
+#define HP_UR_OFF_SQES    0x10000000ULL
+#define HP_UR_ENTER_GET   1
+/* IORING_ENTER_EXT_ARG is bit 3 (verified against io_uring.h + the probe) */
+#define HP_UR_ENTER_EXT   8
+#define HP_UR_KIND_RECV   1
+#define HP_UR_KIND_SEND   2
+#define HP_UR_KIND_POLL   3
+#define HP_UR_KIND        0xff
+#define HP_UR_ENTRIES     32768   /* SQ ring entries (CQ is doubled by kernel) */
+#define HP_UR_RECV_LEN    4096
+
+/* raw ABI, from include/uapi/linux/io_uring.h */
+struct hp_uring_sqe {
+    uint8_t  opcode;
+    uint8_t  flags;
+    uint16_t ioprio;
+    int32_t  fd;
+    union { uint64_t off; uint64_t addr2; };
+    union { uint64_t addr; };
+    uint32_t len;
+    union {
+        uint32_t rw_flags;
+        uint32_t fsync_flags;
+        uint16_t poll_events;
+        uint32_t poll32_events;
+        uint32_t splice_flags;
+    };
+    uint64_t user_data;
+    union { uint16_t buf_group; };
+    uint64_t pad[2];
+};
+struct hp_uring_cqe {
+    uint64_t user_data;
+    int32_t  res;
+    uint32_t flags;
+};
+struct hp_uring_sq_ring {                 /* io_sqring_offsets */
+    uint32_t head, tail, ring_mask, ring_entries, flags, dropped, array, resv1;
+    uint64_t user_addr;
+};
+struct hp_uring_cq_ring {                 /* io_cqring_offsets */
+    uint32_t head, tail, ring_mask, ring_entries, overflow, cqes, flags, resv1;
+    uint64_t user_addr;
+};
+struct hp_uring_setup_params {
+    uint32_t sq_entries, cq_entries, flags, sq_thread_cpu, sq_thread_idle,
+             features, wq_fd;
+    uint32_t resv[3];
+    struct hp_uring_sq_ring sq_off;
+    struct hp_uring_cq_ring cq_off;
+};
+
+struct hp_urchunk {
+    struct hp_urchunk *next;
+    char   *data;
+    size_t  off, len;
+};
+
+/* Per-connection (per-fd) state: one recv buffer (recycled between
+ * completions) and at most one in-flight send chunk per fd; everything is
+ * freed on close, and the epoch stamped into user_data makes completions
+ * that arrive after a close plus fd reuse drop. */
+struct hp_urfds {
+    struct hp_urchunk *shead, *stail;     /* queued send chain */
+    int    squeued;
+    char  *rbuf;                          /* recycled recv buffer */
+    size_t rcap;
+    size_t rlen;                          /* fresh bytes available */
+    int    rarmed;                        /* a recv SQE is queued or in flight */
+    int    rready;                        /* rbuf holds unconsumed data */
+    int    reof;
+    int    listener;
+    int    pollarmed;
+    int    sarmed;                        /* a send SQE is queued or in flight */
+    uint32_t epoch;
+};
+
+static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
+static _Thread_local int hp_ur_fd = -1;
+static _Thread_local unsigned char *hp_ur_sqes;
+static _Thread_local struct hp_uring_cqe *hp_ur_cqes;
+static _Thread_local uint32_t *hp_ur_sqarr;
+static _Thread_local volatile uint32_t *hp_ur_sq_head, *hp_ur_sq_tail;
+static _Thread_local volatile uint32_t *hp_ur_cq_head, *hp_ur_cq_tail;
+static _Thread_local uint32_t hp_ur_sqtail, hp_ur_cqhead;
+static _Thread_local uint32_t hp_ur_sqmask, hp_ur_cqmask;
+static _Thread_local struct hp_urfds *hp_ur_fds;
+static _Thread_local uint32_t hp_ur_fdscap;
+static _Thread_local int hp_ur_pushfail;    /* submits that hit a full ring */
+static _Thread_local int hp_ur_dbg;         /* HPHP_URING_DEBUG=1 */
+
+static int hp_uring_active(void) { return hp_ur_st == 1; }
+
+static struct hp_urfds *hp_ur_st_of(hp_sock fd) {
+    if (fd < 0 || (uint32_t)fd >= hp_ur_fdscap) return NULL;
+    return &hp_ur_fds[fd];
+}
+
+static void hp_ur_fdgrow(hp_sock fd) {
+    uint32_t want = (uint32_t)fd + 1;
+    if (want <= hp_ur_fdscap) return;
+    uint32_t ncap = hp_ur_fdscap ? hp_ur_fdscap : 4096;
+    while (ncap < want) {
+        if (ncap > ((uint32_t)1 << 26)) { hp_ur_st = -1; return; }
+        ncap *= 2;
+    }
+    struct hp_urfds *nf = (struct hp_urfds *)realloc(hp_ur_fds,
+                       (size_t)ncap * sizeof *nf);
+    if (!nf) { hp_ur_st = -1; return; }
+    memset(nf + hp_ur_fdscap, 0, (size_t)(ncap - hp_ur_fdscap) * sizeof *nf);
+    hp_ur_fds = nf;
+    hp_ur_fdscap = ncap;
+}
+
+static void hp_ur_drop_send_chain(struct hp_urfds *st) {
+    struct hp_urchunk *c = st->shead;
+    while (c) { struct hp_urchunk *n = c->next; free(c->data); free(c); c = n; }
+    st->shead = st->stail = NULL;
+    st->squeued = 0;
+}
+
+/* Drop everything the ring still references for an fd. The kernel cancels
+ * in-flight SQEs on file release; completions that still arrive are dropped
+ * by the epoch in user_data. */
+static void hp_ur_free_fd(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st) return;
+    hp_ur_drop_send_chain(st);
+    free(st->rbuf);
+    uint32_t e = st->epoch + 1;          /* keep escalating so fd-reuse
+                                            completions always mismatch */
+    memset(st, 0, sizeof *st);
+    st->epoch = e;
+}
+
+static long hp_ur_enter(long to_submit, long min_complete, int wait_ms) {
+    if (wait_ms < 0) return syscall(SYS_io_uring_enter, (long)hp_ur_fd,
+                                    to_submit, min_complete,
+                                    HP_UR_ENTER_GET, 0L, 0L);
+    struct timespec ts;
+    ts.tv_sec = wait_ms / 1000;
+    ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+    long r = syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit,
+                     min_complete, HP_UR_ENTER_GET | HP_UR_ENTER_EXT,
+                     (long)&ts, (long)sizeof ts);
+    if (r >= 0 || (errno != EINVAL && errno != ENOSYS)) return r;
+    /* kernels without the ext-arg timeout still work, without the bound */
+    return syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit,
+                   min_complete ? min_complete : 1, HP_UR_ENTER_GET, 0L, 0L);
+}
+
+static bool hp_uring_setup(void) {
+    const char *env = getenv("HPHP_URING");
+    if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) return false;
+    hp_ur_dbg = getenv("HPHP_URING_DEBUG") != NULL;
+    struct hp_uring_setup_params p;
+    memset(&p, 0, sizeof p);
+    int fd = (int)syscall(SYS_io_uring_setup, (unsigned long)HP_UR_ENTRIES, &p);
+    if (fd < 0) return false;
+    size_t sq_sz = p.sq_off.array + (size_t)p.sq_entries * sizeof(uint32_t);
+    size_t cq_sz = p.cq_off.cqes + (size_t)p.cq_entries * sizeof(struct hp_uring_cqe);
+    size_t sqe_sz = (size_t)p.sq_entries * sizeof(struct hp_uring_sqe);
+    void *sqring = mmap(0, sq_sz, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE, fd, 0);
+    void *cqring = mmap(0, cq_sz, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE, fd, (off_t)HP_UR_OFF_CQ);
+    void *sqes = mmap(0, sqe_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_POPULATE, fd, (off_t)HP_UR_OFF_SQES);
+    if (sqring == MAP_FAILED || cqring == MAP_FAILED || sqes == MAP_FAILED) {
+        if (sqring != MAP_FAILED) munmap(sqring, sq_sz);
+        if (cqring != MAP_FAILED) munmap(cqring, cq_sz);
+        if (sqes != MAP_FAILED) munmap(sqes, sqe_sz);
+        close(fd);
+        return false;
+    }
+    /* ring sizes/masks must come from the kernel-reported BYTE offsets:
+     * with IORING_FEAT_SINGLE_MMAP both rings share one mmap and their
+     * header fields interleave (sq mask sits at sq_off.ring_mask = +16,
+     * NOT at byte 8 like a plain struct overlay would read). Verified
+     * against the raw mmap dump on kernel 6.18. */
+    hp_ur_fd = fd;
+    hp_ur_sqmask = *(volatile uint32_t *)((char *)sqring + p.sq_off.ring_mask);
+    hp_ur_cqmask = *(volatile uint32_t *)((char *)cqring + p.cq_off.ring_mask);
+    hp_ur_sq_head = (volatile uint32_t *)((char *)sqring + p.sq_off.head);
+    hp_ur_sq_tail = (volatile uint32_t *)((char *)sqring + p.sq_off.tail);
+    hp_ur_cq_head = (volatile uint32_t *)((char *)cqring + p.cq_off.head);
+    hp_ur_cq_tail = (volatile uint32_t *)((char *)cqring + p.cq_off.tail);
+    hp_ur_sqarr = (uint32_t *)((char *)sqring + p.sq_off.array);
+    hp_ur_sqes = (unsigned char *)sqes;
+    hp_ur_cqes = (struct hp_uring_cqe *)((char *)cqring + p.cq_off.cqes);
+    hp_ur_sqtail = __atomic_load_n(hp_ur_sq_tail, __ATOMIC_ACQUIRE);
+    hp_ur_cqhead = __atomic_load_n(hp_ur_cq_head, __ATOMIC_ACQUIRE);
+    return true;
+}
+
+static int hp_uring_maybe_setup(void) {
+    if (hp_ur_st == 0) hp_ur_st = hp_uring_setup() ? 1 : -1;
+    return hp_ur_st == 1;
+}
+
+/* Queue one SQE; false when the ring has no space (callers fall back). */
+static bool hp_ur_sq_push(struct hp_uring_sqe *fill) {
+    uint32_t tail = hp_ur_sqtail;
+    uint32_t head = __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE);
+    if (tail - head >= (uint32_t)(hp_ur_sqmask + 1)) {
+        hp_ur_pushfail++;
+        return false;
+    }
+    struct hp_uring_sqe *slot = (struct hp_uring_sqe *)
+        (hp_ur_sqes + (size_t)(tail & hp_ur_sqmask) * sizeof(struct hp_uring_sqe));
+    *slot = *fill;
+    hp_ur_sqarr[tail & hp_ur_sqmask] = tail & hp_ur_sqmask;
+    __atomic_store_n(hp_ur_sq_tail, tail + 1, __ATOMIC_RELEASE);
+    hp_ur_sqtail = tail + 1;
+    return true;
+}
+
+static uint64_t hp_ur_ud(struct hp_urfds *st, hp_sock fd, int kind) {
+    return ((uint64_t)st->epoch << 40) | ((uint64_t)(uint16_t)fd << 8)
+         | (uint64_t)kind;
+}
+
+/* Track (never double-track) one recv per fd. The buffer is recycled across
+ * EAGAIN cycles; a data completion hands it to the app and the app's consume
+ * frees it and arms a fresh one. */
+static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->rarmed || st->reof || st->listener) return false;
+    if (!st->rbuf) {
+        if (want < HP_UR_RECV_LEN) want = HP_UR_RECV_LEN;
+        st->rbuf = (char *)malloc(want);
+        if (!st->rbuf) return false;
+        st->rcap = want;
+    }
+    if (want > st->rcap) {
+        char *nb = (char *)realloc(st->rbuf, want);
+        if (!nb) return false;
+        st->rbuf = nb;
+        st->rcap = want;
+    }
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_RECV;
+    s.fd = (int)fd;
+    s.addr = (uint64_t)(uintptr_t)st->rbuf;
+    s.len = (uint32_t)st->rcap;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_RECV);
+    if (!hp_ur_sq_push(&s)) return false;
+    st->rarmed = 1;
+    return true;
+}
+
+static bool hp_uring_arm_poll(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->pollarmed) return false;
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_POLL;
+    s.fd = (int)fd;
+    s.poll_events = POLLIN;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_POLL);
+    if (!hp_ur_sq_push(&s)) return false;
+    st->pollarmed = 1;
+    return true;
+}
+
+static bool hp_ur_arm_send_head(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->sarmed || !st->shead) return false;
+    struct hp_urchunk *c = st->shead;
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_SEND;
+    s.fd = (int)fd;
+    s.addr = (uint64_t)(uintptr_t)(c->data + c->off);
+    s.len = (uint32_t)(c->len - c->off);
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_SEND);
+    if (!hp_ur_sq_push(&s)) return false;
+    st->sarmed = 1;
+    return true;
+}
+
+/* Queue a response for the ring: the bytes are copied into the chunk so the
+ * caller's hstr can be freed while the send is still in flight. The full
+ * length is claimed as sent (so write_response's bookkeeping matches the
+ * sync contract) and the flush happens on the next poll cycle's enter.
+ * -2 on a fatal path (no ring slot, OOM, stalled peer) so the caller's close
+ * path cleans up, exactly like the synchronous contract. */
+static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->reof) return -2;
+    if (st->squeued >= 64) {                       /* a stalled peer */
+        st->reof = 1;
+        hp_ur_drop_send_chain(st);
+        return -2;
+    }
+    size_t n = a->len + b->len;
+    char *buf = (char *)malloc(n ? n : 1);
+    if (!buf) { st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
+    if (a->len) memcpy(buf, a->data, a->len);
+    if (b->len) memcpy(buf + a->len, b->data, b->len);
+    struct hp_urchunk *c = (struct hp_urchunk *)malloc(sizeof *c);
+    if (!c) { free(buf); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
+    c->data = buf; c->off = 0; c->len = n; c->next = NULL;
+    if (st->stail) st->stail->next = c; else st->shead = c;
+    st->stail = c;
+    st->squeued++;
+    if (!st->sarmed) hp_ur_arm_send_head(fd);
+    return (int64_t)n;
+}
+
+/* Return the fresh bytes for fd. The ring only pushes an fd into the ready
+ * list when its recv completed with data, so this copies out and re-arms the
+ * same buffer -- a read costs zero syscalls and zero malloc. */
+static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || !st->rready) return hp_str_lit("");
+    size_t avail = st->rlen < maxall ? st->rlen : maxall;
+    hstr *out = avail ? hp_str_new(st->rbuf, avail) : hp_str_lit("");
+    if (avail && (size_t)avail >= st->rlen) {
+        st->rready = 0;
+        st->rlen = 0;
+        st->rarmed = 0;
+        hp_uring_arm_recv(fd, maxall);
+    }
+    return out;
+}
+
+/* Submit everything queued since the last cycle, wait up to timeout_ms for
+ * progress, then drain the completions. */
+static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
+    long to_submit = (long)(hp_ur_sqtail -
+        __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
+    uint32_t head = hp_ur_cqhead;
+    uint32_t have;
+    {
+        uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
+        have = tail - head;
+    }
+    hp_ur_enter(to_submit, 1, have > 0 ? 0 : timeout_ms);
+
+    for (;;) {
+        uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
+        if (head == tail) break;
+        struct hp_uring_cqe *c = hp_ur_cqes + (head & hp_ur_cqmask);
+        head++;
+        uint64_t ud = c->user_data;
+        int kind = (int)(ud & HP_UR_KIND);
+        if (kind != HP_UR_KIND_RECV && kind != HP_UR_KIND_SEND &&
+            kind != HP_UR_KIND_POLL) continue;
+        hp_sock fd = (hp_sock)((ud >> 8) & 0xffff);
+        uint32_t epoch = (uint32_t)(ud >> 40);
+        if (hp_ur_dbg)
+            fprintf(stderr, "[ur] cqe kind=%d fd=%d ep=%u res=%d\n",
+                    kind, (int)fd, epoch, c->res);
+        struct hp_urfds *st = hp_ur_st_of(fd);
+        if (!st || st->epoch != epoch) continue;   /* closed + reused fd */
+        if (kind == HP_UR_KIND_RECV) {
+            st->rarmed = 0;
+            if (c->res > 0) {
+                st->rlen = (size_t)c->res;
+                st->rready = 1;
+                if (in) hp_arr_push(in, hp_of_int(fd));
+            } else if (c->res == -EAGAIN || c->res == -EINTR) {
+                hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+            } else {
+                /* 0 = orderly close, negative = hard error */
+                st->reof = 1;
+                if (in) hp_arr_push(in, hp_of_int(fd));
+            }
+        } else if (kind == HP_UR_KIND_POLL) {
+            st->pollarmed = 0;
+            if (c->res == -ECANCELED || c->res == -EBADF) continue;
+            if (c->res & POLLIN) {
+                if (in) hp_arr_push(in, hp_of_int(fd));
+                hp_uring_arm_poll(fd);             /* keep watching */
+            }
+        } else {
+            st->sarmed = 0;
+            struct hp_urchunk *c2 = st->shead;
+            if (!c2) continue;
+            if (c->res >= 0) {
+                c2->off += (size_t)c->res;
+                if (c2->off >= c2->len) {
+                    st->shead = c2->next;
+                    if (!st->shead) st->stail = NULL;
+                    st->squeued--;
+                    free(c2->data);
+                    free(c2);
+                }
+            } else if (c->res != -ECANCELED && c->res != -EBADF &&
+                       c->res != -EAGAIN && c->res != -EINTR) {
+                /* EPIPE / ECONNRESET: the peer died mid-response */
+                st->reof = 1;
+                if (in) hp_arr_push(in, hp_of_int(fd));
+                hp_ur_drop_send_chain(st);
+            }
+            if (!st->reof) hp_ur_arm_send_head(fd);
+        }
+        /* keep this fd's pipeline flowing for the next cycle */
+        if (!st->reof && !st->listener && !st->rready && !st->rarmed)
+            hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+    }
+    __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
+    hp_ur_cqhead = head;
+    /* a submit that hit a full ring would otherwise leave its fd silent
+     * forever (no armed SQE means no completion means no retry): scan the
+     * fd table once. In the common case the flag is 0 and this costs
+     * nothing. */
+    if (hp_ur_pushfail) {
+        hp_ur_pushfail = 0;
+        for (uint32_t i = 0; i < hp_ur_fdscap; i++) {
+            struct hp_urfds *st = &hp_ur_fds[i];
+            if (st->reof || st->listener) continue;
+            if (st->shead && !st->sarmed) hp_ur_arm_send_head((hp_sock)i);
+            if (st->rbuf && !st->rready && !st->rarmed)
+                hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN);
+        }
+    }
+    (void)out;
+}
+#endif /* HP_UR_CAN */
+
+
+
+#ifdef HP_UR_CAN
+static int hp_uring_active(void);
+static void hp_ur_free_fd(hp_sock fd);
+static hstr *hp_uring_take_recv(hp_sock fd, size_t want);
+static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b);
+#endif
+
 hval hpbi_epoll_add(hval s) {
     hp_net_init();
 #if !defined(_WIN32)
     hp_sock fd = sock_of(s);
     if (fd == HP_SOCK_BAD) return hp_of_bool(false);
+#ifdef HP_UR_CAN
+    if (hp_uring_maybe_setup()) {
+        hp_ur_fdgrow(fd);
+        struct hp_urfds *st = hp_ur_st_of(fd);
+        if (st) {
+            int lt = 0; socklen_t accsl = sizeof lt;
+            getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &lt, &accsl);
+            st->listener = (lt == 1);
+            if (hp_ur_dbg)
+                fprintf(stderr, "[ur] add fd=%d listener=%d\n", (int)fd, st->listener);
+            if (st->listener) hp_uring_arm_poll(fd);
+            else hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+        }
+        return hp_of_bool(true);
+    }
+#endif
     if (g_epfd < 0) g_epfd = epoll_create1(0);
     if (g_epfd < 0) return hp_of_bool(false);
     struct epoll_event ev;
@@ -2331,6 +2809,9 @@ hval hpbi_epoll_add(hval s) {
 hval hpbi_epoll_del(hval s) {
 #if !defined(_WIN32)
     hp_sock fd = sock_of(s);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) { hp_ur_free_fd(fd); return hp_of_bool(true); }
+#endif
     if (fd != HP_SOCK_BAD && g_epfd >= 0)
         epoll_ctl(g_epfd, EPOLL_CTL_DEL, fd, NULL);
 #endif
@@ -2342,6 +2823,9 @@ hval hpbi_epoll_mod(hval s, hval mask) {
     hp_net_init();
 #if !defined(_WIN32)
     hp_sock fd = sock_of(s);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_of_bool(true);
+#endif
     if (fd == HP_SOCK_BAD || g_epfd < 0) return hp_of_bool(false);
     struct epoll_event ev;
     memset(&ev, 0, sizeof ev);
@@ -2362,6 +2846,15 @@ hval hpbi_epoll_wait2(hval inv, hval outv, hval timeout_ms) {
     if (in) { in->len = 0; in->next_index = 0; in->is_map = false; }
     if (out) { out->len = 0; out->next_index = 0; out->is_map = false; }
 #if !defined(_WIN32)
+#ifdef HP_UR_CAN
+    if (hp_uring_maybe_setup()) {
+        int to = (int)hp_val_to_int(timeout_ms);
+        if (to < 0) to = 0;
+        (void)to;
+        hp_uring_wait(in, out, to > 0 ? to : 0);
+        return hp_of_bool(true);
+    }
+#endif
     if (g_epfd < 0) return hp_of_bool(true);
     static _Thread_local struct epoll_event evs[1024];
     int to = (int)hp_val_to_int(timeout_ms);
@@ -2487,6 +2980,9 @@ hval hpbi_stream_peer(hval s) {
 
 hval hpbi_stream_close(hval s) {
     hp_sock fd = sock_of(s);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) hp_ur_free_fd(fd);
+#endif
     if (fd == HP_SOCK_BAD) return hp_of_bool(false);
     hp_sock_graceful_close(fd);
     sock_forget((intptr_t)fd);
@@ -5262,6 +5758,9 @@ int64_t hp_stream_send_nb_t(int64_t fd, hstr *d) {
     return -2;
 }
 int64_t hp_stream_send2_nb_t(int64_t fd, hstr *x, hstr *y) {
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_uring_send2((hp_sock)fd, x, y);
+#endif
 #if defined(_WIN32)
     size_t n = x->len + y->len;
     char *tmp = malloc(n ? n : 1);
@@ -5321,6 +5820,9 @@ hstr *hp_substr_t(hstr *x, int64_t st, int64_t l) {
 hstr *hp_stream_recv_t(int64_t fd, int64_t want) {
     hp_net_init();
     if ((hp_sock)fd == HP_SOCK_BAD) return hp_str_lit("");
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_uring_take_recv((hp_sock)fd, (size_t)(want > 0 ? want : 4096));
+#endif
     if (want <= 0) want = 4096;
     if (want > (1 << 20)) want = (1 << 20);
     static _Thread_local char *g_rbuf = NULL;
