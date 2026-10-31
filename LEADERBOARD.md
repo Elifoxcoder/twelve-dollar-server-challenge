@@ -35,9 +35,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 1 | mojo-iouring-oh-meh | #224 | Mojo (io_uring, SQLite B-tree reads) | **290,000** | 27,332 | 393 | 686 | 0.00 | 87 | 29 | 773 | 2026-10-31 |
 | 2 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
 | 2 | c-rawsqlite-larvance | #210 | C (io_uring, own SQLite-format engine, no libsqlite3) | **280,000** | 26,769 | 8.6 | 23.5 | 0.00 | 74 | 25 | 1,429 | 2026-10-30 |
-| 4 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 4 | ada-native-visseranalytics | #216 | Ada (GNAT, io_uring) | **270,000** ᵇ | 25,824 | 170 | 405 | 0.00 | 86 | 30 | 1,064 | 2026-10-30 |
-| 6 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **266,000** | 25,525 | 17 | 113 | 0.00 | 70 | 25 | 1,206 | 2026-10-30 |
+| 4 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,397 | 22.8 | 114 | 0.00 | 72 | 25 | 544 | 2026-10-31 |
+| 5 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
+| 5 | ada-native-visseranalytics | #216 | Ada (GNAT, io_uring) | **270,000** ᵇ | 25,824 | 170 | 405 | 0.00 | 86 | 30 | 1,064 | 2026-10-30 |
 | 7 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 8 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
 | 8 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
@@ -377,9 +377,10 @@ committed in this repo.
   and patches SQLite's source at build time (`pcache1` max-key change, like objc-uring #154); its HTTP parser's route
   order comes from a load-test route profile (rule 7 question). Earlier heads answered fast HTTP 503s against a
   built-in error budget under memory pressure and stopped accepting below a memory floor; since 0e250e8 that
-  shedding is off by default. Re-scored at 0e250e8: 266,000 held with 0 errors; the 280,000 5-minute hold failed (69 %,
-  mostly connection refused). (Earlier: 271,000 at 1ecaac1, 266,000 at 1b4cb97 with 0.60 % HTTP 503s.) Scored as
-  submitted (266k); held open for Arjay (rules 1/3/7 question).
+  shedding is off by default. Re-scored at cc7f3af (tcp_mem `Connection: close` hint now off too): 276,000 held with
+  0 errors; the 290,000 5-minute hold failed (21.7 %, mostly connection refused). (Earlier: 266,000 at 0e250e8,
+  271,000 at 1ecaac1, 266,000 at 1b4cb97 with 0.60 % HTTP 503s.) Scored as submitted (276k); held open for Arjay
+  (rules 1/3/7 question).
 - **v-epoll-i098's follow-up #191** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`td_sqlite.c`,
   like lean-derive #153; amalgamation not patched; SQL fallback). Scored as submitted (257k at `47a4cbb`, footnote ᵛ);
   held open for Arjay (rules 2/3 question). The author offers to drop `td_sqlite.c` if reads must go through SQL.
