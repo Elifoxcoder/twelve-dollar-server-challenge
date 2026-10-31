@@ -285,7 +285,11 @@ up most new connections were refused (28 % errors at 23k, 32 % at 25k, 76–84 %
 p99, 1,571 MB). From 63,000 up most new connections were refused: 22 % errors in the 63,000 5-minute hold, 81–88 % at
 65k/70k/80k (2-min), at 31–32 % CPU, with the app still running (no crash or OOM kill in the journal). That points at
 the 65,535 fd limit (it stops accepting instead of shedding idle keep-alives); memory also peaked at ~1.57 GB in every
-failing probe.
+failing probe. Its follow-up **#218** (`15b3d62`, Rayo `facd446`, frees idle buffers, SQLite B-tree reads; held, not
+merged: see the rule flags) scored **200,000** (19,615 req/s, p95 236 / p99 596 ms, 0 err, 82 % CPU, 39 µs/req,
+1,198 MB, 2026-10-31) and is CPU-bound: 210,000 failed the 5-minute hold on p99 (1.2 s at 87 %); the 320,000 2-minute
+probe collapsed (85 % errors, mostly connection refused). The row above stays on #202's merged code until #218 is
+merged.
 
 ᵃ **asm-epoll #207's errors are rolled-back writes near full CPU.** It is the follow-up to #130 (120,000 at `8c3c277`),
 scored at `d273c86`. The 0.61 % in its scored hold (95 % CPU) are all HTTP 500s (34,684), only on POSTs: 8 % of likes
@@ -377,6 +381,9 @@ committed in this repo.
 - **c-uring-curvynes #217** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`sqlite_driver.c`,
   like lean-derive #153; unmodified SQLite amalgamation, SQL fallback; writes use SQL). Scored as submitted (230k at
   `e5a86a3`); held open for Arjay (rules 2/3 question).
+- **crystal-rayo's follow-up #218** reads `GET /feed` / `GET /posts/:id` through SQLite B-tree cursors (`src/native.c`
+  built against the pinned SQLite amalgamation, like lean-derive #153; writes use SQL). Scored as submitted (200k at
+  `15b3d62`, footnote ʳ); held open for Arjay (rules 2/3 question).
 - **python-pyrustapi #147 serves its reads from the `pyrustapi` package's native SQL tier** (`sql=` route options),
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
