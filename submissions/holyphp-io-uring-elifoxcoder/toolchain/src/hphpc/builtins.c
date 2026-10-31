@@ -56,6 +56,7 @@ void builtins_init(void) {
     add("strchr",        B_STR2,    ty_mixed,  false, false);   /* alias, string|false */
     add("strpos",        B_MISC,    ty_mixed,  false, false);   /* (hay, needle[, offset]) -> int|false, PHP-style */
     add("str_contains",  B_STR2,    ty_bool,   false, false);
+    add("str_at_eq",      B_MISC,    ty_bool,   false, false);
     add("str_starts_with", B_STR2,  ty_bool,   false, false);
     add("str_ends_with", B_STR2,    ty_bool,   false, false);
     add("strcmp",        B_CMP,     ty_int,    false, false);
@@ -278,6 +279,7 @@ void builtins_init(void) {
     add("stream_socket_client", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept2", B_MISC, ty_mixed, false, false);   /* (srv, timeoutMs): false on timeout */
+    add("accept_emfile",     B_ZERO,    ty_bool,   false, false);   /* last accept failed with EMFILE/ENFILE */
     add("stream_set_blocking",  B_MISC, ty_bool,   false, false);
     add("stream_set_nodelay",   B_MISC, ty_bool,   false, false);
     add("stream_ready",         B_MISC, type_array_of(ty_mixed), false, false);

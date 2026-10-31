@@ -212,6 +212,25 @@ hval hpbi_strpos(hval h, hval n, hval off) {
     if (r < 0) return hp_of_bool(false);   /* PHP: strpos miss => false */
     RETI(r + o);                            /* absolute position */
 }
+/* str_at_eq($s, $start, $len, $lit): compare $len bytes at $start with the
+ * literal, without building a substring. */
+hval hpbi_str_at_eq(hval s, hval start, hval len, hval lit) {
+    hstr *x = hp_val_to_str(s);
+    hstr *y = hp_val_to_str(lit);
+    int64_t st = hp_val_to_int(start);
+    int64_t n = hp_val_to_int(len);
+    if (st < 0 || n < 0 || (size_t)n != y->len ||
+        (uint64_t)st + (uint64_t)n > (uint64_t)x->len)
+        return hp_of_bool(false);
+    return hp_of_bool(memcmp(x->data + st, y->data, (size_t)n) == 0);
+}
+bool hp_str_at_eq_t(hstr *x, int64_t st, int64_t n, hstr *y) {
+    if (st < 0 || n < 0 || (size_t)n != y->len ||
+        (uint64_t)st + (uint64_t)n > (uint64_t)x->len)
+        return false;
+    return memcmp(x->data + st, y->data, (size_t)n) == 0;
+}
+
 hval hpbi_str_contains(hval h, hval n) {
     RETB(hp_str_index(hp_val_to_str(h), hp_val_to_str(n)) >= 0);
 }
@@ -1969,6 +1988,8 @@ hval hpbi_stream_socket_client(hval addr) {
     return hp_of_int((int64_t)(intptr_t)s);
 }
 
+static _Thread_local int g_accept_errno = 0;
+
 hval hpbi_stream_socket_accept(hval srv) {
     hp_net_init();
     hp_sock s = sock_of(srv);
@@ -1981,8 +2002,14 @@ hval hpbi_stream_socket_accept(hval srv) {
         if (c != HP_SOCK_BAD) {
             sock_nonblocking(c, true);
             sockrec((intptr_t)c, true);
+            g_accept_errno = 0;
             return hp_of_int((int64_t)(intptr_t)c);
         }
+#if defined(_WIN32)
+        g_accept_errno = WSAGetLastError();
+#else
+        g_accept_errno = errno;
+#endif
         if (!hp_sock_wouldblock()) return hp_of_bool(false);
         sock_sleep_ms(5);
     }
@@ -2005,8 +2032,14 @@ hval hpbi_stream_socket_accept2(hval srv, hval timeout_ms) {
         if (c != HP_SOCK_BAD) {
             sock_nonblocking(c, true);
             sockrec((intptr_t)c, true);
+            g_accept_errno = 0;
             return hp_of_int((int64_t)(intptr_t)c);
         }
+#if defined(_WIN32)
+        g_accept_errno = WSAGetLastError();
+#else
+        g_accept_errno = errno;
+#endif
         if (!hp_sock_wouldblock()) return hp_of_bool(false);
         if (waited >= limit) return hp_of_bool(false);   /* poll timed out */
         sock_sleep_ms(5);
@@ -2063,6 +2096,14 @@ hval hpbi_stream_recv(hval s, hval maxn) {
     if (!blocked)                    /* hard error: treat as closed */
         sockrec((intptr_t)fd, true)->eof = true;
     return hp_of_str(hp_str_lit(""));
+}
+
+hval hpbi_accept_emfile(void) {
+#if defined(_WIN32)
+    return hp_of_bool(g_accept_errno == WSAEMFILE);
+#else
+    return hp_of_bool(g_accept_errno == EMFILE || g_accept_errno == ENFILE);
+#endif
 }
 
 hval hpbi_stream_send(hval s, hval data) {
