@@ -184,6 +184,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | goose-native-tbsvttr | #143 | Goose (native) | **failed** (install OOM) | | | | | | | | 2026-10-28 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
 | — | rust-hyper-dannie203 | #178 | Rust (hyper) | **failed** (build: no cargo) | | | | | | | | 2026-10-29 |
+| — | spice-ngspice-public | #220 | SPICE (ngspice + Verilog chip, sqlite3 CLI), behind Nginx | **failed** (0: 504s at 500 users) | | | | | | | | 2026-10-31 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -334,6 +335,10 @@ committed in this repo.
 - **Rust #178 — build failed** (`6aa144b`): `install.sh` installs Rust with rustup into root's `~/.cargo`, but
   `build.sh` runs as the `deploy` user, which has no `cargo` (exit 127), so the app never built (1/42 tests). CI passed
   because GitHub's runner has Rust preinstalled. Not patched.
+- **SPICE #220 — scored 0** (`f84ba73`): installed, built and passed 42/42, but no probe passed. The search
+  halves down from 20,000 to its 500-user floor, and every probe ran at 100 % CPU with Nginx 504s: 93 % errors at
+  500 users (p50 30 s, 11 req/s, 70 ms of CPU per request), 99 % at 1,000–2,500. Its README expects ~150 users,
+  below the search floor.
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
@@ -341,7 +346,7 @@ committed in this repo.
 - **Tokens without `exp` accepted** (SPEC requires rejecting them): java-nio #88, quarkus #67 (SmallRye
   grace), kotlin #83, scala #107, node-uws #102, dart #46, go-champ3oy #76, pypy #84 (deliberately), bash #89,
   go-gnet #38, kotlin-ktor #36, python-fastapi-granian #41, go-stdlib #44, kotlin-ktor-C-Hatton #45, go-epoll-damianoneill #52,
-  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, java-jdkhttpserver #209 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
+  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, java-jdkhttpserver #209, spice-ngspice #220 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
 - **Kotlin Ktor #36 (and #53, based on it) commit `gradle/wrapper/gradle-wrapper.jar`**. Arjay ruled (2026-10-26) that
   the standard Gradle wrapper jar is fine and not a prebuilt binary under rule 10. Kotlin Ktor #36 also returned a few HTTP 500s on writes under load (1–5 per probe,
   0 in the scored hold); its StatusPages handler doesn't log the exception. kotlin-springboot #66 commits the same
