@@ -28,7 +28,8 @@ at 0 % errors);
 its #216 run (`ee683db`) and #211 run (`7ff01df`) held 270,000, its #223 run (`5eebfe2`) 257,000 and its earlier #198
 run (`bb6aee1`) 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #226
 (`a343a03`); its earlier #205 run (`6271ee8`) held 133,000. c-iouring-shivanshthapliyal is scored at its follow-up PR
-#230 (`b32c4ee`); its earlier #214 run (`9844f31`) held 238,000.
+#230 (`b32c4ee`); its earlier #214 run (`9844f31`) held 238,000. sql-sqlite3cli-public is scored at its follow-up PR
+#232 (`1319a07`); its earlier #219 run (`3f7cab9`) held 6,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -186,7 +187,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 143 | php-codeigniter-melroy89 | #50 | PHP (CodeIgniter, FrankenPHP) | **9,500** | 926 | 332 | 456 | 0.00 | 99 | 995 | 626 | 2026-10-30 |
 | 145 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
 | 145 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
-| 147 | sql-sqlite3cli-public | #219 | SQL (sqlite3 CLI, Bash accept), behind Nginx | **6,000** | 590 | 60 | 114 | 0.13 | 88 | 1,387 | 261 | 2026-10-31 |
+| 147 | sql-sqlite3cli-public | #232 | SQL (sqlite3 CLI, Bash accept), behind Nginx | **7,000** | 688 | 167 | 309 | 0.80 | 96 | 1,298 | 258 | 2026-10-31 |
 | 148 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
