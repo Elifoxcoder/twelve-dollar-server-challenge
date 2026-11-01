@@ -321,6 +321,12 @@ class Server {
     pub int $insLike = 0;
     pub int $hasPost = 0;
 
+    /* Operator introspection: leapfrogged only when HPHP_STATS=1 (the run
+     * scripts never set it, so bench requests pay exactly zero for this). */
+    pub bool $statsmode = false;
+    pub int $reqs = 0;
+    pub int $reqsBase = 0;
+
     /* ------------------------------------------------------- setup */
 
     public function open(string $host, int $port): bool {
@@ -329,6 +335,7 @@ class Server {
         $sec = getenv("JWT_SECRET");
         if ($sec === false || $sec == "") { $sec = "twelve-dollar-challenge"; }
         $this->secret = $sec;
+        if (getenv("HPHP_STATS") == "1") { $this->statsmode = true; }
 
         $db = sqlite_open($path);
         if ($db == 0) {
@@ -638,6 +645,7 @@ class Server {
     }
 
     public function parse(int $fd, string $in): void {
+        if ($this->statsmode) { $this->reqs++; }
         $buf = $in;
         while (true) {
             $he = strpos($buf, "\r\n\r\n");
@@ -667,6 +675,8 @@ class Server {
                     $this->on_feed($fd);
                 } else if ($pl == 7 && str_at_eq($buf, $ps, 7, "/health")) {
                     $this->on_health($fd);
+                } else if ($this->statsmode && $pl == 6 && str_at_eq($buf, $ps, 6, "/stats")) {
+                    $this->on_stats($fd);
                 } else if ($pl > 7 && str_at_eq($buf, $ps, 6, "/posts") && $buf[$ps + 6] == "/") {
                     $this->on_post($fd, substr($buf, $ps + 7, $pl - 7));
                 } else {
@@ -990,6 +1000,18 @@ class Server {
             $b = '{"status":"degraded","db":"unreachable","error":' . json_encode($e) . '}';
             $this->send_json($fd, 503, $b);
         }
+    }
+
+    /* Operator introspection (HPHP_STATS=1 only): the runtime counters are
+     * cumulative, so the response carries the delta since the previous call
+     * of this endpoint and the raw snapshot. A polling client chooses the
+     * interval and divides. */
+    public function on_stats(int $fd): void {
+        $rt = runtime_stats();
+        $body = '{"interval":{"reqs":' . ($this->reqs - $this->reqsBase)
+              . '},"runtime":' . $rt . '}';
+        $this->reqsBase = $this->reqs;
+        $this->send_json($fd, 200, $body);
     }
 
     public function on_create(int $fd, string $auth, string $body): void {

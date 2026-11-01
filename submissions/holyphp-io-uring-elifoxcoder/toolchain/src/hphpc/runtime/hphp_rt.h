@@ -65,6 +65,30 @@ typedef struct hobj hobj;
 typedef struct hclosure hclosure;
 typedef struct hval hval;
 
+/* ---------- runtime counters (generic introspection) ----------
+ * Plain adds: the VM is single-threaded. Exposed as a JSON object by the
+ * runtime_stats() builtin; the indices are the key order. */
+enum {
+    HP_ST_ENTER = 0,   /* io_uring enter syscalls issued */
+    HP_ST_SQE_SUB,     /* SQEs driven into the kernel in one enter */
+    HP_ST_SQE_PUSH,    /* SQEs accepted by the ring */
+    HP_ST_SQE_PARK,    /* pushes rejected because the ring was full */
+    HP_ST_CQE,         /* CQEs drained (incl. stale + cancels) */
+    HP_ST_CQE_RECV,
+    HP_ST_CQE_SEND,
+    HP_ST_CQE_POLL,
+    HP_ST_ARM_RECV,
+    HP_ST_ARM_SEND,
+    HP_ST_ARM_POLL,
+    HP_ST_CLOSE,       /* stream_close calls (connection ends) */
+    HP_ST_ACCEPT,      /* accepted connections */
+    HP_ST_SEND_CHUNK,  /* send-payload copies queued (malloc per chunk) */
+    HP_ST_STR_NEW,     /* hstr allocations */
+    HP_ST_SCOPE_END,   /* poll cycles / memory scopes closed */
+    HP_ST_N
+};
+extern uint64_t hp_st[HP_ST_N];
+
 /* ---------- strings: length-prefixed, refcounted ---------- */
 /* hstr flags */
 #define HP_F_STATIC 1u  /* interned literal: lives in the literal table forever */
@@ -451,6 +475,8 @@ hval hpbi_stream_send2(hval s, hval a, hval b);
 hval hpbi_stream_send_nb(hval s, hval data);
 hval hpbi_stream_send2_nb(hval s, hval a, hval b);
 hval hpbi_nofile_limit(void);
+hval hpbi_runtime_stats(void);
+hstr *hp_runtime_stats_t(void);
 hval hpbi_stream_ready(hval handles, hval timeout_ms);
 hval hpbi_stream_ready_into(hval out, hval handles, hval timeout_ms);
 hval hpbi_epoll_add(hval s);

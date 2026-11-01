@@ -296,6 +296,7 @@ void builtins_init(void) {
     add("stream_send_nb",       B_MISC, ty_int,    false, false);
     add("stream_send2_nb",      B_MISC, ty_int,    false, false);
     add("nofile_limit",         B_ZERO, ty_int,    false, false);
+    add("runtime_stats",        B_ZERO, ty_string, false, false);
     add("uring_active",         B_ZERO, ty_bool,   false, false);
     add("stream_eof",           B_MISC, ty_bool,   false, false);
     add("stream_peer",          B_MISC, ty_string, false, false);

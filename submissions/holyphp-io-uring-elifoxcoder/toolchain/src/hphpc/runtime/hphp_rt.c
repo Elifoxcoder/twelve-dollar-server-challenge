@@ -133,6 +133,7 @@ void hp_scope_begin(void) { g_scope_depth++; }
 void hp_scope_end(void) {
     if (g_scope_depth == 0) return;
     if (--g_scope_depth > 0) return;
+    hp_st[HP_ST_SCOPE_END]++;
     hp_arena_reset();
 }
 
@@ -217,6 +218,7 @@ static hstr *hp_str_alloc(size_t len, size_t cap) {
 
 hstr *hp_str_new(const char *bytes, size_t len) {
     hstr *s = hp_str_alloc(len, len + 1);
+    hp_st[HP_ST_STR_NEW]++;
     if (bytes && len) memcpy(s->data, bytes, len);
     s->data[len] = 0;
     return s;

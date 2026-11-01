@@ -2043,6 +2043,7 @@ hval hpbi_stream_socket_accept(hval srv) {
 #endif
             sockrec((intptr_t)c, true);
             g_accept_errno = 0;
+            hp_st[HP_ST_ACCEPT]++;
             return hp_of_int((int64_t)(intptr_t)c);
         }
 #if defined(_WIN32)
@@ -2081,6 +2082,7 @@ hval hpbi_stream_socket_accept2(hval srv, hval timeout_ms) {
 #endif
             sockrec((intptr_t)c, true);
             g_accept_errno = 0;
+            hp_st[HP_ST_ACCEPT]++;
             return hp_of_int((int64_t)(intptr_t)c);
         }
 #if defined(_WIN32)
@@ -2464,6 +2466,8 @@ static _Thread_local uint32_t hp_ur_retcap, hp_ur_rethead, hp_ur_rettail;
 static _Thread_local uint32_t *hp_ur_closing; /* fds waiting for a send drain */
 static _Thread_local uint32_t hp_ur_closecap, hp_ur_closecnt;
 
+uint64_t hp_st[HP_ST_N];   /* runtime counters, see hphp_rt.h */
+
 static int hp_uring_active(void) { return hp_ur_st == 1; }
 
 static struct hp_urfds *hp_ur_st_of(hp_sock fd) {
@@ -2586,6 +2590,8 @@ static void hp_ur_free_fd(hp_sock fd) {
 }
 
 static long hp_ur_enter(long to_submit, long min_complete, int wait_ms) {
+    hp_st[HP_ST_ENTER]++;
+    hp_st[HP_ST_SQE_SUB] += (uint64_t)(to_submit > 0 ? to_submit : 0);
     if (wait_ms < 0) return syscall(SYS_io_uring_enter, (long)hp_ur_fd,
                                     to_submit, min_complete,
                                     HP_UR_ENTER_GET, 0L, 0L);
@@ -2671,6 +2677,7 @@ static bool hp_ur_sq_push(struct hp_uring_sqe *fill) {
     uint32_t tail = hp_ur_sqtail;
     uint32_t head = __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE);
     if (tail - head >= (uint32_t)(hp_ur_sqmask + 1)) {
+        hp_st[HP_ST_SQE_PARK]++;
         return false;   /* no slot: the fd is parked in the retry ring */
     }
     struct hp_uring_sqe *slot = (struct hp_uring_sqe *)
@@ -2679,6 +2686,7 @@ static bool hp_ur_sq_push(struct hp_uring_sqe *fill) {
     hp_ur_sqarr[tail & hp_ur_sqmask] = tail & hp_ur_sqmask;
     __atomic_store_n(hp_ur_sq_tail, tail + 1, __ATOMIC_RELEASE);
     hp_ur_sqtail = tail + 1;
+    hp_st[HP_ST_SQE_PUSH]++;
     return true;
 }
 
@@ -2708,6 +2716,7 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     struct hp_uring_sqe s;
     memset(&s, 0, sizeof s);
     s.opcode = HP_UR_OP_RECV;
+    hp_st[HP_ST_ARM_RECV]++;
     s.fd = (int)fd;
     s.addr = (uint64_t)(uintptr_t)st->rbuf;
     s.len = (uint32_t)st->rcap;
@@ -2723,6 +2732,7 @@ static bool hp_uring_arm_poll(hp_sock fd) {
     struct hp_uring_sqe s;
     memset(&s, 0, sizeof s);
     s.opcode = HP_UR_OP_POLL;
+    hp_st[HP_ST_ARM_POLL]++;
     s.fd = (int)fd;
     s.poll_events = POLLIN;
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_POLL);
@@ -2738,6 +2748,7 @@ static bool hp_ur_arm_send_head(hp_sock fd) {
     struct hp_uring_sqe s;
     memset(&s, 0, sizeof s);
     s.opcode = HP_UR_OP_SEND;
+    hp_st[HP_ST_ARM_SEND]++;
     s.fd = (int)fd;
     s.addr = (uint64_t)(uintptr_t)(c->data + c->off);
     s.len = (uint32_t)(c->len - c->off);
@@ -2771,6 +2782,7 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
     struct hp_urchunk *c = (struct hp_urchunk *)malloc(sizeof *c);
     if (!c) { free(buf); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
     c->data = buf; c->off = 0; c->len = n; c->next = NULL;
+    hp_st[HP_ST_SEND_CHUNK]++;
     if (st->stail) st->stail->next = c; else st->shead = c;
     st->stail = c;
     st->squeued++;
@@ -2813,6 +2825,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         if (head == tail) break;
         struct hp_uring_cqe *c = hp_ur_cqes + (head & hp_ur_cqmask);
         head++;
+        hp_st[HP_ST_CQE]++;
         uint64_t ud = c->user_data;
         int kind = (int)(ud & HP_UR_KIND);
         if (kind != HP_UR_KIND_RECV && kind != HP_UR_KIND_SEND &&
@@ -2825,6 +2838,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         struct hp_urfds *st = hp_ur_st_of(fd);
         if (!st || st->epoch != epoch) continue;   /* closed + reused fd */
         if (kind == HP_UR_KIND_RECV) {
+            hp_st[HP_ST_CQE_RECV]++;
             st->rarmed = 0;
             if (st->closeafter) continue;   /* app already closed: ignore */
             if (c->res > 0) {
@@ -2839,6 +2853,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
                 if (in) hp_arr_push(in, hp_of_int(fd));
             }
         } else if (kind == HP_UR_KIND_POLL) {
+            hp_st[HP_ST_CQE_POLL]++;
             st->pollarmed = 0;
             if (st->closeafter) continue;   /* app already closed: ignore */
             if (c->res < 0 && (c->res == -ECANCELED || c->res == -EBADF))
@@ -2854,6 +2869,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
                 if (in) hp_arr_push(in, hp_of_int(fd));
             }
         } else {
+            hp_st[HP_ST_CQE_SEND]++;
             st->sarmed = 0;
             struct hp_urchunk *c2 = st->shead;
             if (c2) {
@@ -3204,6 +3220,7 @@ hval hpbi_stream_peer(hval s) {
 
 hval hpbi_stream_close(hval s) {
     hp_sock fd = sock_of(s);
+    if (fd != HP_SOCK_BAD) hp_st[HP_ST_CLOSE]++;
 #ifdef HP_UR_CAN
     if (hp_uring_active()) {
         struct hp_urfds *st = hp_ur_st_of(fd);
@@ -6047,6 +6064,35 @@ bool hp_uring_active_t(void) {
 #endif
 }
 hval hpbi_uring_active(void) { return hp_of_bool(hp_uring_active_t()); }
+
+/* runtime_stats(): JSON snapshot of the process counters (see hphp_rt.h).
+ * Generic introspection, like nofile_limit(): a program (or the operator) can
+ * see syscalls/allocations per request. Key order == HP_ST index order. */
+static const char *const hp_stat_names[HP_ST_N] = {
+    "enter", "sqe_submitted", "sqe_pushed", "sqe_parked",
+    "cqe", "cqe_recv", "cqe_send", "cqe_poll",
+    "arm_recv", "arm_send", "arm_poll",
+    "close", "accept", "send_chunk", "str_new", "scope_end",
+};
+hval hpbi_runtime_stats(void) {
+    return hp_of_str(hp_runtime_stats_t());
+}
+hstr *hp_runtime_stats_t(void) {
+    char tmp[80];
+    Buf b;
+    hbuf_init(&b);
+    hbuf_write(&b, "{", 1);
+    for (int i = 0; i < HP_ST_N; i++) {
+        snprintf(tmp, sizeof tmp, "%s\"%s\":%llu", i ? "," : "",
+                 hp_stat_names[i], (unsigned long long)hp_st[i]);
+        hbuf_write(&b, tmp, strlen(tmp));
+    }
+    hbuf_write(&b, "}", 1);
+    char *p = hbuf_take(&b);
+    hstr *r = hp_str_new(p, strlen(p));
+    free(p);
+    return r;
+}
 
 /* ---- typed fast paths for the request/parse and SQLite calls ---- */
 
