@@ -23,10 +23,9 @@ is scored at its follow-up PR #191 (`47a4cbb`); its earlier #113 run held 100,00
 its follow-up PR #218 (`15b3d62`); its earlier #202 run (`cc1105c`) held 60,000 (it refused connections past ~60k at
 30 % CPU). asm-epoll-HauLTCE is scored at its follow-up PR #207
 (`d273c86`); its earlier #130 run (`8c3c277`) held 120,000. ada-native-visseranalytics is scored at its follow-up PR
-#229 (`f0fb733`; 270,000 passed the 2-minute probe, but the 5-minute holds at 270,000, 257,000 and 244,000 failed on p99
-at 0 % errors);
-its #216 run (`ee683db`) and #211 run (`7ff01df`) held 270,000, its #223 run (`5eebfe2`) 257,000 and its earlier #198
-run (`bb6aee1`) 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #236
+#237 (`7ce1623`, the same code as #216's `ee683db`; 260,000 and 280,000 failed the 2-minute probe on p99 at 0 % errors);
+its #229 run (`f0fb733`) held 232,000, its #216 run (`ee683db`) and #211 run (`7ff01df`) 270,000, its #223 run
+(`5eebfe2`) 257,000 and its earlier #198 run (`bb6aee1`) 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #236
 (`9ed9f2e`); its #226 run (`a343a03`) held 140,000 and its earlier #205 run (`6271ee8`) held 133,000. c-iouring-shivanshthapliyal is scored at its follow-up PR
 #230 (`b32c4ee`); its earlier #214 run (`9844f31`) held 238,000. sql-sqlite3cli-public is scored at its follow-up PR
 #232 (`1319a07`); its earlier #219 run (`3f7cab9`) held 6,000.
@@ -52,11 +51,11 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 9 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 10 | c-iouring-unorig-username | #184 | C (io_uring) | **250,000** | 24,072 | 123 | 294 | 0.00 | 91 | 34 | 985 | 2026-10-29 |
 | 10 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 12 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 13 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
-| 14 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 15 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 16 | ada-native-visseranalytics | #229 | Ada (GNAT, io_uring, SQLite B-tree reads) | **232,000** | 22,544 | 15 | 148 | 0.00 | 74 | 30 | 1,328 | 2026-10-31 |
+| 10 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
+| 13 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 14 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
+| 15 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 16 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
 | 17 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
 | 18 | c-iouring-moneebullah25 | #228 | C (io_uring, SQLite B-tree reads) | **228,000** | 22,144 | 41 | 62 | 0.00 | 62 | 26 | 1,497 | 2026-10-31 |
 | 18 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
