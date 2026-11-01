@@ -18,7 +18,8 @@ its merged code is newer than what was scored (`a08923d`). go-epoll-MegaPanchamZ
 (`e66a931`, not merged yet); its earlier #72 run (`9df7449`) held 165,000. c-iouring-meros is scored at its follow-up PR #199 (`097ef9b`, not
 merged yet); its merged #137 code (`b2a5207`) held 235,000. fsharp-kestrel-delneg is scored at its follow-up PR #201
 (`a8bf27f`); its earlier #142 run (`45ebea5`) held 260,000. c-iouring-moneebullah25 is scored at its follow-up PR
-#228 (`f07f17f`); its #203 run (`3f0c2c1`) held 230,000 and its earlier #156 run (`065c235`) held 209,000. v-epoll-i098
+#244 (`aad9c34`); its #228 run (`f07f17f`) held 228,000, its #203 run (`3f0c2c1`) 230,000 and its earlier #156 run
+(`065c235`) 209,000. v-epoll-i098
 is scored at its follow-up PR #191 (`47a4cbb`); its earlier #113 run held 100,000. crystal-rayo-faustinoaq is scored at
 its follow-up PR #218 (`15b3d62`); its earlier #202 run (`cc1105c`) held 60,000 (it refused connections past ~60k at
 30 % CPU). asm-epoll-HauLTCE is scored at its follow-up PR #207
@@ -57,8 +58,8 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 15 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
 | 16 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
 | 17 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
-| 18 | c-iouring-moneebullah25 | #228 | C (io_uring, SQLite B-tree reads) | **228,000** | 22,144 | 41 | 62 | 0.00 | 62 | 26 | 1,497 | 2026-10-31 |
-| 18 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
+| 17 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
+| 19 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
 | 20 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
 | 21 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
 | 21 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
@@ -222,7 +223,9 @@ the merged #204 row (epoll, 76,000, 2026-10-30). CPU-bound: 150,000 failed the 2
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at
-`0ed86bf` hit the 1-hour install timeout). c-iouring-moneebullah25 #228: 240,000 passed the 2-minute probe but failed
+`0ed86bf` hit the 1-hour install timeout). c-iouring-moneebullah25 #244: 240,000 failed the 2-minute probe on p99
+(2.6 s at 70 % CPU, 0 errors) and 320,000 collapsed (78 % errors, nearly all `connection refused`); its earlier #228
+run: 240,000 passed the 2-minute probe but failed
 the 5-minute hold with 70 % errors, nearly all `connection refused` from mid-hold on; 250k–320k 2-minute probes failed
 the same way. crystal-rayo #218: CPU-bound, 210,000 failed the 5-minute hold on p99 (1.2 s at 87 %); the 320,000
 2-minute probe collapsed (85 % errors, mostly connection refused).
@@ -379,7 +382,7 @@ committed in this repo.
   data tuned to the benchmark, and a non-source input to the build). Scored as submitted (125k); held open for Arjay.
 - **Arjay's rulings on SQLite (2026-10-31).** Reading `/feed` and `/posts/:id` through SQLite's own B-tree/cursor API
   is allowed (rules 2/3), so the B-tree entries (lean-derive #153, mojo #224, v-epoll #191, c-uring-curvynes #217,
-  crystal-rayo #218, c-iouring-moneebullah25 #228, rust-native #222 and others) carry no flag. Ordering routes or fast
+  crystal-rayo #218, c-iouring-moneebullah25 #244, rust-native #222 and others) carry no flag. Ordering routes or fast
   paths by observed traffic is fine too (rule 7), as long as every route works for any request, and so are SQLite's
 public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custom VFS). Not allowed (rule 2):
   - **an own engine for SQLite's file format**: c-rawsqlite-larvance #210 (`raw_sqlite.c`, no libsqlite3; scored
