@@ -125,6 +125,45 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 | `8ee9c5a` (send-path fix) | 130,000 | 12,618 | 93 % | 69 | 0 |
 | `7a3f61e` (sweep rate-limit, `str_to_int`) | 135,000 | 13,117 | 92 % | 65 | 0 |
 | `1569472` (io_uring backend + ring-scale fixes) | **145,000** | 14,093 | 91 % | 60 | 0 |
+| `d75dd29` (allocation-free request path) | box run requested | — | — | — | — |
+
+### The allocation round (`2f8507b` … `d75dd29`)
+
+Instrumentation first: `runtime_stats()` exposes generic runtime counters
+(ring enters, SQEs/CQEs per op kind, send copies, hstr allocations, poll
+cycles); `server.hphp` mirrors them at `/stats` when the operator sets
+`HPHP_STATS=1` — bench requests pay nothing for it (the run scripts never set
+the env).
+
+Then three measured fixes on the request path, each one attributing its cost
+with the counters (or gdb sampling under load) before touching it:
+
+| counter per `/health` request | before | after |
+|---|---:|---:|
+| hstr allocations (`str_new`) | 7.01 | **0.02** |
+| send-payload copies (`send_chunk`) | 1.00 | **0.00** |
+| ring `io_uring_enter` | 1.11 | **0.97** |
+
+- `c10afad`: `strpos` scanned by *copying the tail into a throwaway string*
+  first (gdb sampling: 3 of 5 allocations per request); it now scans in place
+  from the offset. The hot `/health` response is built straight into one
+  buffer and handed to the ring send chunk (`stream_send_sb(self-fd, sb)` —
+  the builder buffer *becomes* the send chunk, zero payload copies; generics:
+  `int_digits`, the SB flow). The parse loop skips the pipelining-`substr`
+  for single-request packets.
+- `d75dd29`: the recv handout is a pointer, not a copy — with the ring active
+  each connection owns one long-lived hstr block the kernel writes into;
+  `stream_recv` returns it directly (`HP_F_SCOPED` so retain paths copy and
+  close frees it; a caller asking for fewer bytes than arrived still gets the
+  classic copy).
+
+Local (WSL microbenchmarks — my machine, not box numbers): a minimal C epoll
+server on the same stack costs 54.1 µs/req; this build is at 58 µs/req, i.e.
+~4 µs above the C floor with `/health` at 7 → 0 strings. `/health` latency p95
+1.11 ms → 691 µs, median 436 µs → 359 µs. The box run for `d75dd29` is requested
+upstream with `HPHP_STATS=1` so the same counter split can be read from the $12
+box itself.
+
 
 The 64,000 at `c935dfe` was a bug (EAGAIN treated as fatal in the non-blocking
 send path), fixed in `8ee9c5a`. `30d155b` rate-limits the idle sweep to one
