@@ -888,6 +888,8 @@ void builtins_init(void) {
     add("str_from_bytes",       B_MISC, ty_string, false, false);
     add("sb_reserve",           B_MISC, ty_bool,   false, false);
     add("sb_take",              B_MISC, ty_string, false, false);
+    add("stream_send_sb",       B_MISC, ty_int,    false, false);
+    add("int_digits",           B_MISC, ty_int,    false, false);
     add("sqlite_open",          B_MISC, ty_int,    false, false);  /* (path) -> handle|0 */
     add("sqlite_close",         B_MISC, ty_bool,   false, false);
     add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */

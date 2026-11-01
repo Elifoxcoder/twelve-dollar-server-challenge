@@ -205,13 +205,23 @@ hval hpbi_strstr(hval h, hval n) {
 hval hpbi_strchr(hval h, hval n) { return hpbi_strstr(h, n); }
 hval hpbi_strpos(hval h, hval n, hval off) {
     hstr *hay = hp_val_to_str(h);
+    hstr *nee = hp_val_to_str(n);
     long long o = (hp_tag(off) == HV_NULL) ? 0 : off.u.i;
     if (o < 0) o = 0;
     if ((size_t)o > hay->len) o = (long long)hay->len;
-    hstr *tail = hp_str_new(hay->data + o, hay->len - (size_t)o);
-    int64_t r = hp_str_index(tail, hp_val_to_str(n));
-    if (r < 0) return hp_of_bool(false);   /* PHP: strpos miss => false */
-    RETI(r + o);                            /* absolute position */
+    /* search in place from the offset: the old path copied the tail into a
+     * throwaway hstr before scanning -- one allocation per call (three per
+     * request on the hot routes). Same result values, nothing copied. */
+    const char *base = hay->data + o;
+    size_t hlen = hay->len - (size_t)o;
+    if (nee->len == 0) return hp_of_int((int64_t)o);
+    if (nee->len <= hlen) {
+        for (size_t i = 0; i + nee->len <= hlen; i++) {
+            if (memcmp(base + i, nee->data, nee->len) == 0)
+                return hp_of_int((int64_t)o + (int64_t)i);
+        }
+    }
+    return hp_of_bool(false);   /* PHP: strpos miss => false */
 }
 /* str_at_eq($s, $start, $len, $lit): compare $len bytes at $start with the
  * literal, without building a substring. */
@@ -2758,6 +2768,26 @@ static bool hp_ur_arm_send_head(hp_sock fd) {
     return true;
 }
 
+/* Queue a response whose buffer the runtime already owns (stream_send_sb):
+ * like hp_uring_send2, but there is nothing to copy -- the malloc'd builder
+ * buffer becomes the chunk. -2 on a fatal path, buffer freed. */
+static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->reof) { free(buf); return -2; }
+    if (st->squeued >= 64) {                       /* a stalled peer */
+        st->reof = 1;
+        return -2;
+    }
+    struct hp_urchunk *c = (struct hp_urchunk *)malloc(sizeof *c);
+    if (!c) { free(buf); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
+    c->data = buf; c->off = 0; c->len = len; c->next = NULL;
+    if (st->stail) st->stail->next = c; else st->shead = c;
+    st->stail = c;
+    st->squeued++;
+    if (!st->sarmed) hp_ur_arm_send_head(fd);
+    return (int64_t)len;
+}
+
 /* Queue a response for the ring: the bytes are copied into the chunk so the
  * caller's hstr can be freed while the send is still in flight. The full
  * length is claimed as sent (so write_response's bookkeeping matches the
@@ -3002,6 +3032,7 @@ static int hp_uring_active(void);
 static void hp_ur_free_fd(hp_sock fd);
 static hstr *hp_uring_take_recv(hp_sock fd, size_t want);
 static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b);
+static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len);
 #endif
 
 hval hpbi_epoll_add(hval s) {
@@ -5679,6 +5710,17 @@ hval hpbi_sb_int(hval h, hval n) {
     hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
     return hp_of_bool(true);
 }
+/* int_digits(n): decimal digit count of an integer, so a caller can compute a
+ * Content-Length (or any numeric prefix width) without building a throwaway
+ * string. Generic. */
+int64_t hp_int_digits_t(int64_t v) {
+    unsigned long long u = v < 0 ? (unsigned long long)(-(v + 1)) + 1ULL
+                                 : (unsigned long long)v;
+    int64_t d = 1;
+    while (u >= 10ULL) { u /= 10ULL; d++; }
+    return d;
+}
+hval hpbi_int_digits(hval n) { return hp_of_int(hp_int_digits_t(hp_val_to_int(n))); }
 /* Find the first byte that JSON must escape (c < 0x20, '"' or '\\').
  * Clean runs are scanned eight bytes at a time. */
 static size_t json_next_special(const unsigned char *p, size_t n, size_t i) {
@@ -5977,6 +6019,48 @@ hstr *hp_sb_take_t(int64_t h) {
     free(s);
     return r;
 }
+
+/* stream_send_sb(fd, sb): hand the finished builder buffer straight to the
+ * send path without copying it -- the ring send chunk adopts the malloc'd
+ * buffer, so a response costs zero payload copies. Contract:
+ *   n >= 0 : bytes accepted, builder consumed and its buffer now owned by
+ *            the runtime (freed after the send) / in fallback mode fully
+ *            drained.
+ *   -2     : fatal (peer gone, no room, OOM); buffer freed; close the fd. */
+static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
+    if (!sb) return -2;
+    char *buf = sb->b.data;
+    size_t len = sb->b.len;
+    sb->b.data = NULL;
+    sb->b.len = sb->b.cap = 0;
+    if (!buf) {                                   /* empty builder: send "" */
+        buf = (char *)malloc(1);
+        if (!buf) return -2;
+    }
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_uring_send_owned(fd, buf, len);
+#endif
+    size_t off = 0;
+    int waited_ms = 0;
+    while (off < len) {
+        ssize_t r = send(fd, buf + off, (int)(len - off), 0);
+        if (r > 0) { off += (size_t)r; continue; }
+        if (r < 0 && hp_sock_wouldblock() && waited_ms < 2000) {
+            sock_sleep_ms(1);                     /* mirrors stream_send */
+            waited_ms++;
+            continue;
+        }
+        if (r < 0) sockrec((intptr_t)fd, true)->eof = true;
+        free(buf);
+        return -2;
+    }
+    free(buf);
+    return (int64_t)len;
+}
+hval hpbi_stream_send_sb(hval s, hval h) {
+    hp_net_init();
+    return hp_of_int(hp_send_sb_impl(sock_of(s), sb_h(h)));
+}
 int64_t hp_bt_last_t(int64_t h) { return hp_bt_last_impl ? hp_bt_last_impl((void *)(intptr_t)h) : -1; }
 int64_t hp_bt_first_t(int64_t h) { return hp_bt_first_impl ? hp_bt_first_impl((void *)(intptr_t)h) : -1; }
 int64_t hp_bt_prev_t(int64_t h) { return hp_bt_prev_impl ? hp_bt_prev_impl((void *)(intptr_t)h) : 0; }
@@ -6031,6 +6115,9 @@ int64_t hp_stream_send2_nb_t(int64_t fd, hstr *x, hstr *y) {
     if (r >= 0) return (int64_t)r;
     return hp_sock_wouldblock() ? -1 : -2;
 #endif
+}
+int64_t hp_stream_send_sb_t(int64_t fd, int64_t hb) {
+    return hp_send_sb_impl((hp_sock)fd, (HpSb *)(intptr_t)hb);
 }
 bool hp_epoll_mod_t(int64_t fd, int64_t mask) {
 #if !defined(_WIN32)

@@ -324,6 +324,7 @@ class Server {
     /* Operator introspection: leapfrogged only when HPHP_STATS=1 (the run
      * scripts never set it, so bench requests pay exactly zero for this). */
     pub bool $statsmode = false;
+    pub bool $ring = false;
     pub int $reqs = 0;
     pub int $reqsBase = 0;
 
@@ -473,6 +474,7 @@ class Server {
         $codes = [200, 201, 400, 401, 404, 500, 503];
         $texts = ["OK", "Created", "Bad Request", "Unauthorized",
                   "Not Found", "Internal Server Error", "Service Unavailable"];
+        $this->ring = uring_active();
         for ($i = 0; $i < 7; $i++) {
             $this->hdr[$codes[$i]] = "HTTP/1.1 " . $codes[$i] . " " . $texts[$i]
                 . "\r\nContent-Type: application/json\r\nContent-Encoding: identity"
@@ -683,7 +685,11 @@ class Server {
                     $this->send_json($fd, 404, '{"error":"not found"}');
                 }
                 if (!(iarr_get($this->socks, $fd) != 0)) { return; }
-                $buf = substr($buf, $he + 4);
+                $np = $he + 4;                          /* EXPERIMENT R */
+                if ($np == strlen($buf)) { return; }    /* no substr for the
+                                                           last request in
+                                                           the packet */
+                $buf = substr($buf, $np);
                 if ($buf == "") { return; }
                 continue;
             }
@@ -992,6 +998,7 @@ class Server {
         $rc = sqlite_step($this->health);
         if ($rc == 100) {
             sqlite_reset($this->health);
+            if ($this->ring) { $this->on_health_fast($fd); return; }
             $b = '{"status":"ok","db":"ok","uptime_s":' . (time() - $this->start) . '}';
             $this->send_json($fd, 200, $b);
         } else {
@@ -1000,6 +1007,34 @@ class Server {
             $b = '{"status":"degraded","db":"unreachable","error":' . json_encode($e) . '}';
             $this->send_json($fd, 503, $b);
         }
+    }
+
+    /* The hot /health response built straight into the send buffer: header
+     * and body leave in one buffer, `int_digits` sizes the Content-Length
+     * without a throwaway string, and stream_send_sb hands the buffer to
+     * the ring send chunk -- no hstr for the payload, no memcpy into the
+     * send chain (write_response's classic path builds the same bytes with
+     * concatenations, a send-payload copy, and a throwaway hstr). The shed
+     * contract matches write_response exactly: at shedAt the tail says
+     * Connection: close and the fd is queued for close after the drain
+     * (closed connections still answer health checks correctly, once). */
+    public function on_health_fast(int $fd): void {
+        $up = time() - $this->start;
+        $shed = $this->nconn >= $this->shedAt;
+        $sb = sb_new();
+        sb_reserve($sb, 208);
+        sb_put($sb, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: identity\r\nContent-Length: ");
+        sb_int($sb, 37 + int_digits($up));
+        if ($shed) {
+            sb_put($sb, "\r\nConnection: close\r\n\r\n{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
+        } else {
+            sb_put($sb, "\r\nConnection: keep-alive\r\n\r\n{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
+        }
+        sb_int($sb, $up);
+        sb_put($sb, "}");
+        $sent = stream_send_sb($fd, $sb);
+        if ($sent == -2) { $this->close_fd($fd); return; }
+        if ($shed) { $this->close_fd($fd); }
     }
 
     /* Operator introspection (HPHP_STATS=1 only): the runtime counters are
