@@ -2435,6 +2435,32 @@ struct hp_urchunk {
     size_t  off, len;
 };
 
+/* A response is one chunk: the struct itself is the same size for every
+ * request, so a tiny per-thread free list keeps the malloc/free churn off
+ * the hot path (the payload buffer still has its own lifetime -- it is the
+ * builder buffer, handed over by stream_send_sb, or a fresh copy). */
+static _Thread_local struct hp_urchunk *g_chunk_spare = NULL;
+static _Thread_local int g_chunk_spare_n = 0;
+static struct hp_urchunk *hp_ur_chunk_alloc(void) {
+    struct hp_urchunk *c = g_chunk_spare;
+    if (c) {
+        g_chunk_spare = c->next;
+        g_chunk_spare_n--;
+        return c;
+    }
+    return (struct hp_urchunk *)malloc(sizeof *c);
+}
+static void hp_ur_chunk_release(struct hp_urchunk *c) {
+    free(c->data);
+    if (g_chunk_spare_n < 32) {
+        c->next = g_chunk_spare;
+        g_chunk_spare = c;
+        g_chunk_spare_n++;
+    } else {
+        free(c);
+    }
+}
+
 /* Per-connection (per-fd) state: one recv buffer (recycled between
  * completions) and at most one in-flight send chunk per fd; everything is
  * freed on close, and the epoch stamped into user_data makes completions
@@ -2541,7 +2567,7 @@ static void hp_ur_retfd(hp_sock fd) {
 
 static void hp_ur_drop_send_chain(struct hp_urfds *st) {
     struct hp_urchunk *c = st->shead;
-    while (c) { struct hp_urchunk *n = c->next; free(c->data); free(c); c = n; }
+    while (c) { struct hp_urchunk *n = c->next; hp_ur_chunk_release(c); c = n; }
     st->shead = st->stail = NULL;
     st->squeued = 0;
 }
@@ -2594,7 +2620,7 @@ static void hp_ur_free_fd(hp_sock fd) {
         }
     }
     hp_ur_drop_send_chain(st);
-    free(st->rh);            /* plain calloc'd hstr block, no refcount */
+    hp_free(st->rh);         /* the per-connection recv hstr (hp_alloc'd) */
     uint32_t e = st->epoch + 1;          /* keep escalating so fd-reuse
                                             completions always mismatch */
     memset(st, 0, sizeof *st);
@@ -2792,7 +2818,7 @@ static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len) {
         st->reof = 1;
         return -2;
     }
-    struct hp_urchunk *c = (struct hp_urchunk *)malloc(sizeof *c);
+    struct hp_urchunk *c = hp_ur_chunk_alloc();
     if (!c) { free(buf); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
     c->data = buf; c->off = 0; c->len = len; c->next = NULL;
     if (st->stail) st->stail->next = c; else st->shead = c;
@@ -2823,7 +2849,7 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
     if (!buf) { st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
     if (a->len) memcpy(buf, a->data, a->len);
     if (b->len) memcpy(buf + a->len, b->data, b->len);
-    struct hp_urchunk *c = (struct hp_urchunk *)malloc(sizeof *c);
+    struct hp_urchunk *c = hp_ur_chunk_alloc();
     if (!c) { free(buf); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
     c->data = buf; c->off = 0; c->len = n; c->next = NULL;
     hp_st[HP_ST_SEND_CHUNK]++;
@@ -2908,8 +2934,13 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             } else if (c->res == -EAGAIN || c->res == -EINTR) {
                 hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
             } else {
-                /* 0 = orderly close, negative = hard error */
+                /* 0 = orderly close, negative = hard error. Mirror it into
+                 * the app-side socket record: stream_eof() consults that,
+                 * and without this the app never closes an EOF'd connection
+                 * (leaking the fd and the per-connection recv block). */
                 st->reof = 1;
+                hp_sockrec *sr = sockrec((intptr_t)fd, false);
+                if (sr) sr->eof = true;
                 if (in) hp_arr_push(in, hp_of_int(fd));
             }
         } else if (kind == HP_UR_KIND_POLL) {
@@ -2939,8 +2970,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
                         st->shead = c2->next;
                         if (!st->shead) st->stail = NULL;
                         st->squeued--;
-                        free(c2->data);
-                        free(c2);
+                        hp_ur_chunk_release(c2);
                     }
                 } else if (c->res != -ECANCELED && c->res != -EBADF &&
                            c->res != -EAGAIN && c->res != -EINTR) {
@@ -5879,7 +5909,7 @@ hval hpbi_sb_take(hval h) {
     char *p = hbuf_take(&s->b);
     hstr *r = hp_str_new(p, n);
     free(p);
-    free(s);
+    hp_free(s);
     return hp_of_str(r);
 }
 
@@ -6046,7 +6076,7 @@ hstr *hp_sb_take_t(int64_t h) {
     char *p = hbuf_take(&s->b);
     hstr *r = hp_str_new(p, n);
     free(p);
-    free(s);
+    hp_free(s);
     return r;
 }
 
@@ -6063,6 +6093,8 @@ static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
     size_t len = sb->b.len;
     sb->b.data = NULL;
     sb->b.len = sb->b.cap = 0;
+    hp_free(sb);         /* the builder handle is consumed: only the buffer
+                            travels on (it was leaked before: ~55 B/request) */
     if (!buf) {                                   /* empty builder: send "" */
         buf = (char *)malloc(1);
         if (!buf) return -2;
@@ -6198,9 +6230,11 @@ hstr *hp_runtime_stats_t(void) {
     char tmp[80];
     Buf b;
     hbuf_init(&b);
-    hbuf_write(&b, "{", 1);
+    hbuf_write(&b, "{\"live_allocs\":", 15);
+    snprintf(tmp, sizeof tmp, "%lld", (long long)hp_live_allocs());
+    hbuf_write(&b, tmp, strlen(tmp));
     for (int i = 0; i < HP_ST_N; i++) {
-        snprintf(tmp, sizeof tmp, "%s\"%s\":%llu", i ? "," : "",
+        snprintf(tmp, sizeof tmp, "%s\"%s\":%llu", ",",
                  hp_stat_names[i], (unsigned long long)hp_st[i]);
         hbuf_write(&b, tmp, strlen(tmp));
     }

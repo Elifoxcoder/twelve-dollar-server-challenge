@@ -382,6 +382,7 @@ struct hobj {
 };
 
 void *hp_alloc(size_t n);
+void hp_free(void *p);           /* counterpart of hp_alloc: keeps the live counter honest */
 int64_t hp_live_allocs(void);   /* diagnostic: live hp_alloc blocks */
 int64_t hp_live_bytes(void);    /* diagnostic: glibc in-use heap bytes */
 void hp_echo(hval v);              /* PHP echo: print value */

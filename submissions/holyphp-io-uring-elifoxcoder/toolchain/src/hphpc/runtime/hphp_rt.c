@@ -50,6 +50,16 @@ void *hp_alloc(size_t n) {
     return p;
 }
 
+/* Free a block from hp_alloc. The allocator is a plain calloc, so this is
+ * free() plus the diagnostic counter -- callers that free a heap string or
+ * builder must use hp_str_free/hp_free so hp_live_allocs stays a true leak
+ * indicator. */
+void hp_free(void *p) {
+    if (!p) return;
+    free(p);
+    g_live_allocs--;
+}
+
 void hp_rc_inc(void *p) { (void)p; }
 void hp_rc_dec(void *p) { (void)p; }
 
