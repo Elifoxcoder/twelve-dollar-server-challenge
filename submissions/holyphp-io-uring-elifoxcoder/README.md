@@ -122,14 +122,18 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 | commit | users held 5 min | req/s | app CPU | µs/req | errors |
 |---|---:|---:|---:|---:|---:|
 | `96aa4f5` (B-tree feed) | 110,000 | 10,637 | 83 % | 73 | 0 |
-| `8ee9c5a` (send-path fix) | **130,000** | 12,618 | 93 % | 69 | 0 |
+| `8ee9c5a` (send-path fix) | 130,000 | 12,618 | 93 % | 69 | 0 |
+| `7a3f61e` (sweep rate-limit, `str_to_int`) | 135,000 | 13,117 | 92 % | 65 | 0 |
+| `1569472` (io_uring backend + ring-scale fixes) | **145,000** | 14,093 | 91 % | 60 | 0 |
 
 The 64,000 at `c935dfe` was a bug (EAGAIN treated as fatal in the non-blocking
 send path), fixed in `8ee9c5a`. `30d155b` rate-limits the idle sweep to one
-slice per second — on the box that sweep was ~52 of the 69 µs/req (the
-endpoints are ~17 µs/req), so it should lift the CPU-bound ceiling further.
-That head is awaiting a box run. The numbers above are what count; the local
-figures below are a proxy.
+slice per second. `1569472` puts the network primitives on io_uring and fixes
+the scale-time paths (deferred close for shed responses, bounded retry drain,
+keep-alive table sized to the ring, `accept4`, listener `TCP_NODELAY`); the
+ring is worth about 5 µs/req. Above 145k the search fails on CPU: 150k ran at
+93 % CPU with p95 567 ms. The numbers above are what count; the local figures
+below are a proxy.
 
 On a VPS shaped like the box (1 vCPU, 2 GB), fresh seed, `wrk`, measuring the
 server's own CPU from `/proc`:
