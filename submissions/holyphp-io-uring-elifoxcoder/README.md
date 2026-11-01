@@ -214,6 +214,35 @@ before, 3/3 runs died; after, 3/3 alive with zero ASAN reports. 9k rps
 keep-alive: 26,855 requests, 0 % errors, server healthy after the run.
 42/42 tests green.
 
+#### This round: 60k connections, native auth, one-buffer feed
+
+- **28,000 → 60,000 held connections.** The kernel caps the io_uring SQ ring
+  at 32768 entries and the server parks one armed recv per connection, so it
+  used to shed everything above 28k; those users paid a TCP handshake plus
+  accept/close for every request. Connections beyond the ring cap now
+  register in an epoll set (the ring still carries the sends), so the server
+  holds up to the descriptor limit. Verified with `HPHP_RING_MAX=10` and 1500
+  connections: 45,000 requests, 0 % errors, and the ring counters show only
+  the 10 ring connections produced recv completions.
+- **native HS256 `jwt_verify`**: split, alg, constant-time signature compare
+  and exp in C. The PHP version allocated ~20 strings per authenticated
+  request; the like path now allocates 13 per request, down from 29.
+- **in-place header parsing** (`str_pos_ci`, `str_int_range`,
+  `str_trim_range`): no `strtolower($head)`, no header copy, no
+  Content-Length substring.
+- **SQLite record decoder** (`bt_cols`): the feed decodes a row's header once
+  in C instead of walking varints byte by byte in the application loop.
+- **feed response from one buffer**: header prepended into the builder and the
+  buffer becomes the ring send chunk (no body copy, no header concatenations).
+- **1 KB recv buffer** (was 4 KB): 60 MB instead of 240 MB at 60k connections.
+  A controlled alternating A/B on one binary measured 77.3 vs 74.6 µs/req
+  (about 3 %) -- a noisy back-to-back comparison had suggested much more, so
+  the number here is the conservative one.
+
+Local numbers (WSL, my machine, not box numbers): like 151 → 136 µs cold and
+61.5 µs at 4k rps; the user-model mix 76.1 → 74.9 µs at 200 VUs. The box run
+is what counts.
+
 
 
 
