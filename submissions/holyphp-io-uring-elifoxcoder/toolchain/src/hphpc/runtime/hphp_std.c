@@ -2525,9 +2525,21 @@ struct hp_urfds {
     int    rtagged;                       /* parked in the retry ring */
     int    closeafter;                    /* close deferred until sends drain */
     int    ctagged;                       /* listed for the deadline check */
+    int    epolled;                       /* readiness via epoll, no recv SQE */
+    int    ringconn;                      /* this connection holds a ring slot */
     int64_t cdeadline;
     uint32_t epoch;
 };
+
+/* Overflow readiness: the kernel caps the SQ ring at 32768 entries, so above
+ * ~28k connections one armed recv per connection no longer fits. Those
+ * connections register in a plain epoll set instead (the ring still carries
+ * the sends), which lets the server hold up to the fd limit. */
+#define HP_UR_RING_MAX_DEFAULT 28000
+static _Thread_local int hp_ur_epfd = -1;
+static _Thread_local int hp_ur_ep_conns = 0;
+static _Thread_local int hp_ur_ring_conns = 0;
+static _Thread_local int hp_ur_ring_max = -1;
 
 static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
 static _Thread_local int hp_ur_fd = -1;
@@ -2619,6 +2631,7 @@ static void hp_ur_drop_send_chain(struct hp_urfds *st) {
 static long hp_ur_enter(long to_submit, long min_complete, int wait_ms);
 static bool hp_ur_arm_send_head(hp_sock fd);
 static void hp_ur_free_fd(hp_sock fd);
+static void hp_ur_ep_del(hp_sock fd);
 
 /* The app asked to close an fd while a SEND is still queued in the ring.
  * The bytes have not reached the kernel yet, so closing now would cancel the
@@ -2664,6 +2677,11 @@ static void hp_ur_free_fd(hp_sock fd) {
         }
     }
     hp_ur_drop_send_chain(st);
+    if (st->ringconn) {
+        st->ringconn = 0;
+        if (hp_ur_ring_conns > 0) hp_ur_ring_conns--;
+    }
+    if (st->epolled) hp_ur_ep_del(fd);
     hp_free(st->rh);         /* the per-connection recv hstr (hp_alloc'd) */
     uint32_t e = st->epoch + 1;          /* keep escalating so fd-reuse
                                             completions always mismatch */
@@ -2799,6 +2817,61 @@ static uint64_t hp_ur_ud(struct hp_urfds *st, hp_sock fd, int kind) {
          | (uint64_t)kind;
 }
 
+/* ---- overflow readiness (epoll) -------------------------------------------
+ * The kernel caps the SQ ring at 32768 entries, so one armed recv per
+ * connection stops fitting around 28k connections. Connections beyond that
+ * register in a plain epoll set; the ring still carries the sends, and the
+ * ring fd itself is watched so one epoll_wait covers both. */
+static int hp_ur_ep_setup(void) {
+    if (hp_ur_epfd >= 0) return hp_ur_epfd;
+    int efd = epoll_create1(0);
+    if (efd < 0) return -1;
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = EPOLLIN;
+    ev.data.fd = (int)hp_ur_fd;          /* ring fd: completions pending */
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, hp_ur_fd, &ev) != 0) { close(efd); return -1; }
+    hp_ur_epfd = efd;
+    return efd;
+}
+
+static bool hp_ur_ep_add(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st) return false;
+    if (hp_ur_ep_setup() < 0) return false;
+    if (!st->rh) {
+        hstr *h = (hstr *)hp_alloc(sizeof(hstr) + HP_UR_RECV_LEN + 1);
+        if (!h) return false;
+        h->len = 0;
+        h->cap = HP_UR_RECV_LEN + 1;
+        h->hash = 0;
+        h->rc = 1;
+        h->flags = HP_F_SCOPED;
+        h->data[0] = 0;
+        st->rh = h;
+        st->rcap = HP_UR_RECV_LEN;
+    }
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = EPOLLIN;
+    ev.data.fd = (int)fd;
+    if (epoll_ctl(hp_ur_epfd, EPOLL_CTL_ADD, fd, &ev) != 0) return false;
+    st->epolled = 1;
+    hp_ur_ep_conns++;
+    if (hp_ur_dbg)
+        fprintf(stderr, "[ur] epoll-add fd=%d ep_conns=%d ring_conns=%d\n",
+                (int)fd, hp_ur_ep_conns, hp_ur_ring_conns);
+    return true;
+}
+
+static void hp_ur_ep_del(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || !st->epolled) return;
+    epoll_ctl(hp_ur_epfd, EPOLL_CTL_DEL, fd, NULL);
+    st->epolled = 0;
+    if (hp_ur_ep_conns > 0) hp_ur_ep_conns--;
+}
+
 /* Track (never double-track) one recv per fd. The kernel fills this
  * connection's own hstr block (allocated once, flag scoped so the app's
  * persist/concopy paths copy and free skips it); on a data completion the
@@ -2807,6 +2880,8 @@ static uint64_t hp_ur_ud(struct hp_urfds *st, hp_sock fd, int kind) {
 static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || st->rarmed || st->reof || st->listener) return false;
+    /* overflow connections are watched by epoll, not by an armed SQE */
+    if (st->epolled) return true;
     if (!st->rh) {
         if (want < HP_UR_RECV_LEN) want = HP_UR_RECV_LEN;
         /* hstr layout with inline data; one extra byte so data[want] can
@@ -2874,6 +2949,25 @@ static bool hp_ur_arm_send_head(hp_sock fd) {
     return true;
 }
 
+/* Track a fresh connection: ring while the ring has room, epoll beyond it.
+ * HPHP_RING_MAX overrides the threshold (used by tests to exercise the
+ * overflow path without 28k live sockets). */
+static bool hp_uring_add_conn(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st) return false;
+    if (hp_ur_ring_max < 0) {
+        const char *e = getenv("HPHP_RING_MAX");
+        hp_ur_ring_max = (e && *e) ? atoi(e) : HP_UR_RING_MAX_DEFAULT;
+        if (hp_ur_ring_max < 1) hp_ur_ring_max = 1;
+    }
+    if (hp_ur_ring_conns < hp_ur_ring_max) {
+        st->ringconn = 1;
+        hp_ur_ring_conns++;
+        return hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+    }
+    return hp_ur_ep_add(fd);
+}
+
 /* Queue a response whose buffer the runtime already owns (stream_send_sb):
  * like hp_uring_send2, but there is nothing to copy -- the malloc'd builder
  * buffer becomes the chunk. -2 on a fatal path, buffer freed. */
@@ -2937,7 +3031,27 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
  * each handout since the bytes mutate. */
 static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
     struct hp_urfds *st = hp_ur_st_of(fd);
-    if (!st || !st->rready) return hp_str_lit("");
+    if (!st) return hp_str_lit("");
+    if (st->epolled) {
+        /* overflow connection: epoll reported readable, read it now */
+        if (!st->rh) return hp_str_lit("");
+        size_t cap = st->rcap ? st->rcap : HP_UR_RECV_LEN;
+        if (maxall && maxall < cap) cap = maxall;
+        ssize_t r = recv(fd, st->rh->data, cap, 0);
+        if (r > 0) {
+            st->rh->len = (size_t)r;
+            st->rh->hash = 0;
+            st->rh->data[r] = 0;
+            return st->rh;
+        }
+        if (r == 0) {
+            st->reof = 1;
+            hp_sockrec *sr = sockrec((intptr_t)fd, false);
+            if (sr) sr->eof = true;
+        }
+        return hp_str_lit("");
+    }
+    if (!st->rready) return hp_str_lit("");
     size_t avail = st->rlen < maxall ? st->rlen : maxall;
     if (avail < st->rlen) {
         /* caller asks for fewer bytes than arrived (rare; the challenge app
@@ -2976,7 +3090,22 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
         have = tail - head;
     }
-    hp_ur_enter(to_submit, 1, have > 0 ? 0 : timeout_ms);
+    if (hp_ur_ep_conns > 0 && hp_ur_epfd >= 0 && have == 0) {
+        /* Overflow connections exist: submit without blocking, then wait on
+         * the epoll set, which also watches the ring fd. Ring completions are
+         * already in the CQ ring when that fires, so the drain below sees
+         * them; overflow fds go straight into the ready list. */
+        hp_ur_enter(to_submit, 0, 0);
+        struct epoll_event evs[64];
+        int n = epoll_wait(hp_ur_epfd, evs, 64, timeout_ms);
+        for (int i = 0; i < n; i++) {
+            int efd = evs[i].data.fd;
+            if (efd == (int)hp_ur_fd) continue;   /* ring: drained below */
+            if (in) hp_arr_push(in, hp_of_int(efd));
+        }
+    } else {
+        hp_ur_enter(to_submit, 1, have > 0 ? 0 : timeout_ms);
+    }
 
     for (;;) {
         uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
@@ -3216,7 +3345,7 @@ hval hpbi_epoll_add(hval s) {
             if (hp_ur_dbg)
                 fprintf(stderr, "[ur] add fd=%d listener=%d\n", (int)fd, st->listener);
             if (st->listener) hp_uring_arm_poll(fd);
-            else hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+            else hp_uring_add_conn(fd);
         }
         return hp_of_bool(true);
     }

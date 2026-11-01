@@ -479,11 +479,10 @@ class Server {
             if ($this->shedAt < 32000) { $this->shedAt = 32000; }
             if ($this->shedAt > $lim) { $this->shedAt = $lim; }
             /* The ring backend parks one armed recv per connection and the
-             * kernel caps the SQ ring at 32768 entries. Above ~28k live
-             * connections the surplus would wait for a slot before their
-             * requests are even read, so shed earlier: the extra users
-             * reconnect per request instead and stay fast. */
-            if (uring_active() && $this->shedAt > 28000) { $this->shedAt = 28000; }
+             * kernel caps the SQ ring at 32768 entries; the runtime routes
+             * connections beyond that through epoll, so the server can hold
+             * up to the descriptor limit (the fd cap below). */
+            if (uring_active() && $this->shedAt > 60000) { $this->shedAt = 60000; }
         }
         /* Operator override (tests, capacity experiments): the shed regime is
          * the churn regime, so being able to force it locally is how the
