@@ -298,9 +298,19 @@ hval hpbi_strpos(hval h, hval n, hval off) {
     size_t hlen = hay->len - (size_t)o;
     if (nee->len == 0) return hp_of_int((int64_t)o);
     if (nee->len <= hlen) {
-        for (size_t i = 0; i + nee->len <= hlen; i++) {
-            if (memcmp(base + i, nee->data, nee->len) == 0)
-                return hp_of_int((int64_t)o + (int64_t)i);
+        /* memchr for the first byte (SIMD in glibc), then memcmp the rest:
+         * the old loop called memcmp at every position, which showed up as
+         * the top parse cost in the profile. */
+        const char *p = base;
+        const char *end = base + (hlen - nee->len) + 1;
+        while (p < end) {
+            const char *q = (const char *)memchr(p, nee->data[0],
+                                                (size_t)(end - p));
+            if (!q) break;
+            if (nee->len == 1 ||
+                memcmp(q + 1, nee->data + 1, nee->len - 1) == 0)
+                return hp_of_int((int64_t)o + (int64_t)(q - base));
+            p = q + 1;
         }
     }
     return hp_of_bool(false);   /* PHP: strpos miss => false */
@@ -2463,6 +2473,13 @@ static _Thread_local int g_epfd = -1;
 /* IORING_SETUP_CQSIZE = bit 3, IORING_SETUP_CLAMP = bit 4 (uapi io_uring.h) */
 #define HP_UR_SETUP_CQSIZE (1U << 3)
 #define HP_UR_SETUP_CLAMP   (1U << 4)
+/* Cooperative task run: process completions in io_uring_enter instead of
+ * task_work on every syscall exit. DEFER_TASKRUN (6.1+) keeps all task work
+ * in enter; SINGLE_ISSUER is required by it. */
+#define HP_UR_SETUP_COOP_TASKRUN  (1U << 8)
+#define HP_UR_SETUP_TASKRUN_FLAG  (1U << 9)
+#define HP_UR_SETUP_SINGLE_ISSUER (1U << 12)
+#define HP_UR_SETUP_DEFER_TASKRUN (1U << 13)
 #define HP_UR_KIND_RECV   1
 #define HP_UR_KIND_SEND   2
 #define HP_UR_KIND_POLL   3
@@ -2803,8 +2820,19 @@ static bool hp_uring_setup(void) {
      * classic 32k defaults (~3.2 MB). */
     p.sq_entries = HP_UR_ENTRIES;
     p.cq_entries = HP_UR_ENTRIES;
-    p.flags = HP_UR_SETUP_CQSIZE | HP_UR_SETUP_CLAMP;
+    uint32_t base = HP_UR_SETUP_CQSIZE | HP_UR_SETUP_CLAMP;
+    p.flags = base | HP_UR_SETUP_COOP_TASKRUN | HP_UR_SETUP_TASKRUN_FLAG |
+              HP_UR_SETUP_SINGLE_ISSUER | HP_UR_SETUP_DEFER_TASKRUN;
     int fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
+    if (fd < 0) {
+        /* older kernel: drop DEFER_TASKRUN/SINGLE_ISSUER, keep COOP_TASKRUN */
+        p.flags = base | HP_UR_SETUP_COOP_TASKRUN | HP_UR_SETUP_TASKRUN_FLAG;
+        fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
+    }
+    if (fd < 0) {
+        p.flags = base;
+        fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
+    }
     if (fd < 0) {
         memset(&p, 0, sizeof p);
         fd = (int)syscall(SYS_io_uring_setup,
