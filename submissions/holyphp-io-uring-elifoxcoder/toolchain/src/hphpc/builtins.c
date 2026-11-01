@@ -878,6 +878,10 @@ void builtins_init(void) {
     add("bt_rowid",             B_MISC, ty_int,    false, false);
     add("bt_payload_ptr",       B_MISC, ty_int,    false, false);
     add("bt_payload_size",      B_MISC, ty_int,    false, false);
+    add("bt_cols",              B_MISC, ty_int,    false, false);
+    add("bt_col_off",           B_MISC, ty_int,    false, false);
+    add("bt_col_len",           B_MISC, ty_int,    false, false);
+    add("bt_col_int",           B_MISC, ty_int,    false, false);
     add("bt_count_key",        B_MISC, ty_int,    false, false);
     add("iarr_new",            B_MISC, ty_int,    false, false);
     add("iarr_get",            B_MISC, ty_int,    false, false);
@@ -890,6 +894,8 @@ void builtins_init(void) {
     add("sb_json_str",          B_MISC, ty_bool,   false, false);
     add("str_from_bytes",       B_MISC, ty_string, false, false);
     add("sb_reserve",           B_MISC, ty_bool,   false, false);
+    add("sb_len",               B_MISC, ty_int,    false, false);
+    add("sb_prepend",           B_MISC, ty_bool,   false, false);
     add("sb_take",              B_MISC, ty_string, false, false);
     add("stream_send_sb",       B_MISC, ty_int,    false, false);
     add("int_digits",           B_MISC, ty_int,    false, false);

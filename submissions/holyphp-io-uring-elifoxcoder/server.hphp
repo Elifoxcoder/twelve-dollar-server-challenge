@@ -818,56 +818,19 @@ class Server {
         while ($r == 1 && $i < 20) {
             $id = bt_rowid($this->btPosts);
             $p = bt_payload_ptr($this->btPosts);
-            $uid = 0;
-            $bo = 0;
-            $bl = 0;
-            $co = 0;
-            $cl = 0;
-            unsafe {
-                $q = $p as *u8;
-                $hdr = *$q & 255;
-                /* byte 1 is the rowid alias serial type (always 0/NULL) */
-                $k = 2;
-                $st1 = *($q + $k) & 255;
-                $k = $k + 1;
-                $st2 = *($q + $k) & 255;
-                $k = $k + 1;
-                if ($st2 >= 128) { $st2 = (($st2 & 127) << 7) | (*($q + $k) & 255); $k = $k + 1; }
-                $st3 = *($q + $k) & 255;
-                /* serial types 8 and 9 are the constants 0 and 1 with no
-                 * payload; 1..4 store 1..4 bytes, 5 stores 6, 6 stores 8 */
-                $l1 = 0;
-                if ($st1 >= 1 && $st1 <= 4) { $l1 = $st1; }
-                else if ($st1 == 5) { $l1 = 6; }
-                else if ($st1 == 6 || $st1 == 7) { $l1 = 8; }
-                else if ($st1 == 9) { $uid = 1; }
-                $o1 = $hdr;
-                $bl = ($st2 - 13) >> 1;
-                $bo = $o1 + $l1;
-                $cl = ($st3 - 13) >> 1;
-                $co = $bo + $bl;
-                $j = 0;
-                while ($j < $l1) { $uid = ($uid << 8) | (*($q + $o1 + $j) & 255); $j = $j + 1; }
-            }
+            if (bt_cols($this->btPosts) < 4) { break; }
+            $uid = bt_col_int(1);
+            $bo = bt_col_off(2);
+            $bl = bt_col_len(2);
+            $co = bt_col_off(3);
+            $cl = bt_col_len(3);
 
             /* every like whose post id equals this one: they are contiguous */
             $cnt = 0;
             while ($lr == 1) {
                 if ($lpid < 0) {
-                    $lp = bt_payload_ptr($this->btLikes);
-                    $lpid = 0;
-                    unsafe {
-                        $q = $lp as *u8;
-                        $hdr = *$q & 255;
-                        $st0 = *($q + 1) & 255;
-                        $l0 = 0;
-                        if ($st0 >= 1 && $st0 <= 4) { $l0 = $st0; }
-                        else if ($st0 == 5) { $l0 = 6; }
-                        else if ($st0 == 6 || $st0 == 7) { $l0 = 8; }
-                        else if ($st0 == 9) { $lpid = 1; }
-                        $j = 0;
-                        while ($j < $l0) { $lpid = ($lpid << 8) | (*($q + $hdr + $j) & 255); $j = $j + 1; }
-                    }
+                    if (bt_cols($this->btLikes) < 1) { break; }
+                    $lpid = bt_col_int(0);
                 }
                 if ($lpid != $id) { break; }
                 $cnt = $cnt + 1;
@@ -879,14 +842,9 @@ class Server {
             $al = 0;
             if (bt_seek($this->btUsers, $uid) == 1) {
                 $up = bt_payload_ptr($this->btUsers);
-                unsafe {
-                    $q = $up as *u8;
-                    $hdr = *$q & 255;
-                    /* byte 1 is the rowid alias serial type */
-                    $st1 = *($q + 2) & 255;
-                    if ($st1 >= 128) { $st1 = (($st1 & 127) << 7) | (*($q + 3) & 255); }
-                    $al = ($st1 - 13) >> 1;
-                    $a = $up + $hdr;
+                if (bt_cols($this->btUsers) >= 2) {
+                    $al = bt_col_len(1);
+                    $a = $up + bt_col_off(1);
                 }
             }
 
@@ -906,8 +864,18 @@ class Server {
             $r = bt_prev($this->btPosts);
         }
         sb_put($sb, "]}");
-        $body = sb_take($sb);
-        $this->send_json($fd, 200, $body);
+        /* the response header is prepended into the same buffer and the
+         * buffer becomes the send chunk: no body copy, no extra hstr */
+        $blen = sb_len($sb);
+        $shed = $this->nconn >= $this->shedAt;
+        if ($shed) {
+            sb_prepend($sb, $this->hdr[200] . $blen . "\r\nConnection: close\r\n\r\n");
+        } else {
+            sb_prepend($sb, $this->hdr[200] . $blen . "\r\nConnection: keep-alive\r\n\r\n");
+        }
+        $sent = stream_send_sb($fd, $sb);
+        if ($sent == -2) { $this->close_fd($fd); return; }
+        if ($shed) { $this->close_fd($fd); }
     }
 
     /* One post through the same cursors the feed uses: a rowid seek in posts,

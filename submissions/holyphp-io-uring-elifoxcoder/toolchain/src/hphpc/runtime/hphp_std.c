@@ -5985,6 +5985,93 @@ hval hpbi_bt_payload_size(hval h) {
     (void)hp_bt_payload_impl(bt_h(h), &n);
     return hp_of_int(n);
 }
+
+/* ---- record decoder -------------------------------------------------------
+ * SQLite stores a row as: header-size varint, one serial-type varint per
+ * column, then the column payloads in order. The server used to decode that
+ * byte by byte in the application loop (a VM iteration per byte); this
+ * parses it once in C and caches offsets/lengths for the current record.
+ * Generic: no schema knowledge, up to 16 columns. */
+static _Thread_local struct { int off, len, st; } g_bt_col[16];
+static _Thread_local int g_bt_ncol;
+static _Thread_local const unsigned char *g_bt_base;
+
+static int64_t hp_bt_varint(const unsigned char *p, int *used) {
+    uint64_t v = 0;
+    int n = 0;
+    for (int i = 0; i < 9; i++) {
+        unsigned char c = p[i];
+        v = (v << 7) | (uint64_t)(c & 0x7f);
+        n++;
+        if (!(c & 0x80)) break;
+    }
+    *used = n;
+    return (int64_t)v;
+}
+
+static int hp_bt_st_len(int64_t st) {
+    if (st == 0 || st == 8 || st == 9) return 0;
+    if (st >= 1 && st <= 4) return (int)st;
+    if (st == 5) return 6;
+    if (st == 6 || st == 7) return 8;
+    if (st >= 12) return (int)((st - 12) / 2);
+    return 0;
+}
+
+int64_t hp_bt_cols_t(int64_t h) {
+    int n = 0;
+    const unsigned char *p = hp_bt_payload_impl
+        ? hp_bt_payload_impl((void *)(intptr_t)h, &n) : NULL;
+    g_bt_ncol = 0;
+    if (!p || n < 1) return -1;
+    int used = 0;
+    int64_t hdr = hp_bt_varint(p, &used);
+    if (hdr < 1 || hdr > n) return -1;
+    int k = used;
+    int off = (int)hdr;
+    int nc = 0;
+    while (k < (int)hdr && nc < 16) {
+        int u2 = 0;
+        int64_t st = hp_bt_varint(p + k, &u2);
+        k += u2;
+        int len = hp_bt_st_len(st);
+        g_bt_col[nc].st = (int)st;
+        g_bt_col[nc].off = off;
+        g_bt_col[nc].len = len;
+        off += len;
+        nc++;
+    }
+    g_bt_base = p;
+    g_bt_ncol = nc;
+    return nc;
+}
+
+int64_t hp_bt_col_off_t(int64_t i) {
+    return (i >= 0 && i < g_bt_ncol) ? g_bt_col[i].off : 0;
+}
+int64_t hp_bt_col_len_t(int64_t i) {
+    return (i >= 0 && i < g_bt_ncol) ? g_bt_col[i].len : 0;
+}
+int64_t hp_bt_col_int_t(int64_t i) {
+    if (i < 0 || i >= g_bt_ncol) return 0;
+    int st = g_bt_col[i].st;
+    int off = g_bt_col[i].off;
+    int len = g_bt_col[i].len;
+    if (st == 8) return 0;
+    if (st == 9) return 1;
+    if (len <= 0 || len > 8) return 0;
+    const unsigned char *q = g_bt_base + off;
+    uint64_t v = 0;
+    for (int j = 0; j < len; j++) v = (v << 8) | q[j];
+    if (len < 8 && (q[0] & 0x80)) {          /* negative: sign-extend */
+        v |= ~0ULL << (len * 8);
+    }
+    return (int64_t)v;
+}
+hval hpbi_bt_cols(hval h) { return hp_of_int(hp_bt_cols_t((int64_t)hp_val_to_int(h))); }
+hval hpbi_bt_col_off(hval i) { return hp_of_int(hp_bt_col_off_t((int64_t)hp_val_to_int(i))); }
+hval hpbi_bt_col_len(hval i) { return hp_of_int(hp_bt_col_len_t((int64_t)hp_val_to_int(i))); }
+hval hpbi_bt_col_int(hval i) { return hp_of_int(hp_bt_col_int_t((int64_t)hp_val_to_int(i))); }
 hval hpbi_bt_count_key(hval h, hval key) {
     if (!hp_bt_count_key_impl) return hp_of_int(-1);
     return hp_of_int((int64_t)hp_bt_count_key_impl(bt_h(h), (int64_t)hp_val_to_int(key)));
@@ -6103,6 +6190,21 @@ hval hpbi_sb_reserve(hval h, hval n) {
     HpSb *s = sb_h(h);
     int64_t want = hp_val_to_int(n);
     if (want > 0) hbuf_reserve(&s->b, (size_t)want);
+    return hp_of_bool(true);
+}
+/* sb_len(sb): bytes currently in the builder. */
+hval hpbi_sb_len(hval h) { return hp_of_int((int64_t)sb_h(h)->b.len); }
+/* sb_prepend(sb, str): put str in front of the current contents. Used to add
+ * a response header to a body that is already built, without a second buffer
+ * or a header string concatenation. */
+hval hpbi_sb_prepend(hval h, hval str) {
+    HpSb *s = sb_h(h);
+    hstr *x = hp_val_to_str(str);
+    if (x->len == 0) return hp_of_bool(true);
+    hbuf_reserve(&s->b, s->b.len + x->len);
+    if (s->b.len) memmove(s->b.data + x->len, s->b.data, s->b.len);
+    memcpy(s->b.data, x->data, x->len);
+    s->b.len += x->len;
     return hp_of_bool(true);
 }
 hval hpbi_str_from_bytes(hval ptr, hval len) {
@@ -6299,6 +6401,18 @@ bool hp_sb_reserve_t(int64_t h, int64_t n) {
 bool hp_sb_put_t(int64_t h, hstr *x) {
     HpSb *s = (HpSb *)(intptr_t)h;
     hbuf_write(&s->b, x->data, x->len);
+    return true;
+}
+int64_t hp_sb_len_t(int64_t h) {
+    return (int64_t)((HpSb *)(intptr_t)h)->b.len;
+}
+bool hp_sb_prepend_t(int64_t h, hstr *x) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    if (x->len == 0) return true;
+    hbuf_reserve(&s->b, s->b.len + x->len);
+    if (s->b.len) memmove(s->b.data + x->len, s->b.data, s->b.len);
+    memcpy(s->b.data, x->data, x->len);
+    s->b.len += x->len;
     return true;
 }
 bool hp_sb_int_t(int64_t h, int64_t n) {
