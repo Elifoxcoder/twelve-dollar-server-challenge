@@ -158,11 +158,33 @@ with the counters (or gdb sampling under load) before touching it:
   classic copy).
 
 Local (WSL microbenchmarks — my machine, not box numbers): a minimal C epoll
-server on the same stack costs 54.1 µs/req; this build is at 58 µs/req, i.e.
-~4 µs above the C floor with `/health` at 7 → 0 strings. `/health` latency p95
-1.11 ms → 691 µs, median 436 µs → 359 µs. The box run for `d75dd29` is requested
-upstream with `HPHP_STATS=1` so the same counter split can be read from the $12
-box itself.
+server on the same stack costs 54.1 µs/req; this build is at 57.4 µs/req.
+Attribution of the remaining gap, measured by removing one piece at a time:
+SQLite health check 0.7 µs, response builder 0.2 µs, the rest is the
+interpreter/parse and the ring's two completions per request. `/health` is at
+0 strings and 0 payload copies per request; p95 1.11 ms → 691 µs, median
+436 µs → 359 µs. The box run for `d75dd29` (or later) is requested upstream
+with `HPHP_STATS=1` so the same counter split can be read from the $12 box.
+
+#### Leak fixes found by the counters (`06c6b17`)
+
+`runtime_stats()` now also reports `live_allocs`, which turned two silent
+leaks into measurements:
+
+- `stream_send_sb` consumed the builder's payload buffer but never freed the
+  builder handle: **~55 B leaked per `/health` request** (+14.8 MB RSS over
+  270k requests). The handle is freed now; the buffer still becomes the ring
+  send chunk (zero copies unchanged).
+- the io_uring EOF path set the ring's own EOF flag but not the app-side
+  socket record, and `stream_eof()` consults the latter — a client disconnect
+  was never noticed. Measured: 21 closed clients left 21 fds open and the
+  close counter at 0. The EOF completion now mirrors into the socket record:
+  fds return to baseline and `close` equals `accept`.
+
+After both: RSS flat at 14.6 MB over 810k requests (three 30 s windows at
+9k rps), `live_allocs` flat, `str_new` 0.02/req, `send_chunk` 0.00/req,
+`enter` 0.95/req, 42/42 tests green.
+
 
 
 The 64,000 at `c935dfe` was a bug (EAGAIN treated as fatal in the non-blocking
