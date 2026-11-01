@@ -2556,13 +2556,14 @@ static void hp_ur_fdgrow(hp_sock fd) {
  * burn measurable CPU; this stays O(pending). */
 static void hp_ur_retfd(hp_sock fd) {
     struct hp_urfds *st = hp_ur_st_of(fd);
-    if (st && st->rtagged) return;
+    if (st && st->rtagged) { if (hp_ur_dbg) fprintf(stderr, "[ur] park-already fd=%d\n", (int)fd); return; }
     if (st) st->rtagged = 1;
-    if (!hp_ur_retcap) { hp_ur_pushfail++; return; }
+    if (!hp_ur_retcap) { hp_ur_pushfail++; if (hp_ur_dbg) fprintf(stderr, "[ur] park-nocap fd=%d\n", (int)fd); return; }
     uint32_t nt = (hp_ur_rettail + 1) & (hp_ur_retcap - 1);
-    if (nt == hp_ur_rethead) { hp_ur_pushfail++; return; }   /* ring full */
+    if (nt == hp_ur_rethead) { hp_ur_pushfail++; if (hp_ur_dbg) fprintf(stderr, "[ur] park-full fd=%d\n", (int)fd); return; }
     hp_ur_retry[hp_ur_rettail] = (uint32_t)fd;
     hp_ur_rettail = nt;
+    if (hp_ur_dbg) fprintf(stderr, "[ur] park fd=%d\n", (int)fd);
 }
 
 static void hp_ur_drop_send_chain(struct hp_urfds *st) {
@@ -2636,13 +2637,35 @@ static long hp_ur_enter(long to_submit, long min_complete, int wait_ms) {
     struct timespec ts;
     ts.tv_sec = wait_ms / 1000;
     ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+    /* IORING_ENTER_EXT_ARG expects a struct io_uring_getevents_arg, not a
+     * bare timespec: sigmask, sigmask_sz, pad, ts-pointer. Passing the
+     * timespec itself made the kernel reject the call with EINVAL, so the
+     * fallback below blocked in an enter with no timeout at all -- a wait
+     * that never returned whenever no completion was pending. */
+    struct {
+        uint64_t sigmask;
+        uint32_t sigmask_sz;
+        uint32_t pad;
+        uint64_t ts;
+    } ga;
+    memset(&ga, 0, sizeof ga);
+    ga.ts = (uint64_t)(uintptr_t)&ts;
     long r = syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit,
                      min_complete, HP_UR_ENTER_GET | HP_UR_ENTER_EXT,
-                     (long)&ts, (long)sizeof ts);
+                     (long)&ga, (long)sizeof ga);
     if (r >= 0 || (errno != EINVAL && errno != ENOSYS)) return r;
-    /* kernels without the ext-arg timeout still work, without the bound */
-    return syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit,
-                   min_complete ? min_complete : 1, HP_UR_ENTER_GET, 0L, 0L);
+    /* Old kernel without the ext-arg timeout: poll the ring fd for the
+     * timeout, then submit without waiting. Never fall back to an unbounded
+     * enter -- that can sleep forever when nothing is armed. */
+    if (wait_ms > 0) {
+        struct pollfd pf;
+        pf.fd = hp_ur_fd;
+        pf.events = POLLIN;
+        pf.revents = 0;
+        (void)poll(&pf, 1, wait_ms);
+    }
+    return syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit, 0,
+                   HP_UR_ENTER_GET, 0L, 0L);
 }
 
 static bool hp_uring_setup(void) {
@@ -2888,7 +2911,12 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
         st->rready = 0;
         st->rlen = 0;
         st->rarmed = 0;
-        hp_uring_arm_recv(fd, (size_t)st->rcap);
+        /* The app is about to read this buffer; the kernel must not write
+         * the next request into it mid-parse. Defer the re-arm to the next
+         * wait cycle (after the handler returned) instead of arming here. */
+        if (hp_ur_dbg)
+            fprintf(stderr, "[ur] handout fd=%d len=%zu\n", (int)fd, avail);
+        hp_ur_retfd(fd);
     }
     return st->rh;
 }
@@ -2896,6 +2924,7 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
 /* Submit everything queued since the last cycle, wait up to timeout_ms for
  * progress, then drain the completions. */
 static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
+    if (hp_ur_dbg) fprintf(stderr, "[ur] wait to=%d\n", timeout_ms);
     long to_submit = (long)(hp_ur_sqtail -
         __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
     uint32_t head = hp_ur_cqhead;
@@ -2926,6 +2955,8 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         if (kind == HP_UR_KIND_RECV) {
             hp_st[HP_ST_CQE_RECV]++;
             st->rarmed = 0;
+            if (hp_ur_dbg)
+                fprintf(stderr, "[ur] recv-cqe fd=%d res=%d\n", (int)fd, c->res);
             if (st->closeafter) continue;   /* app already closed: ignore */
             if (c->res > 0) {
                 st->rlen = (size_t)c->res;
@@ -2988,8 +3019,12 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         }
         /* keep this fd's pipeline flowing for the next cycle */
         if (!st->reof && !st->closeafter && !st->listener &&
-            !st->rready && !st->rarmed)
-            hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+            !st->rready && !st->rarmed) {
+            if (hp_ur_dbg)
+                fprintf(stderr, "[ur] rearm-after-cqe fd=%d\n", (int)fd);
+            if (!hp_uring_arm_recv(fd, HP_UR_RECV_LEN) && hp_ur_dbg)
+                fprintf(stderr, "[ur] rearm-failed fd=%d\n", (int)fd);
+        }
     }
     __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
     hp_ur_cqhead = head;
@@ -3007,6 +3042,8 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
     while (hp_ur_rethead != hp_ur_rettail && slots > 0) {
         uint32_t i = hp_ur_retry[hp_ur_rethead];
         hp_ur_rethead = (hp_ur_rethead + 1) & (hp_ur_retcap - 1);
+        if (hp_ur_dbg)
+            fprintf(stderr, "[ur] drain fd=%u slots=%u\n", (unsigned)i, slots);
         if (i >= hp_ur_fdscap) continue;
         struct hp_urfds *st = &hp_ur_fds[i];
         if (!st->rtagged) continue;              /* already handled */
@@ -3030,8 +3067,24 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         }
         if (slots == 0) { hp_ur_retfd((hp_sock)i); continue; }  /* recv next cycle */
         if (st->rh && !st->rready && !st->rarmed) {
-            if (hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN)) slots--;
-            else hp_ur_retfd((hp_sock)i);
+            if (hp_ur_dbg)
+                fprintf(stderr, "[ur] retry-arm fd=%u rready=%d rarmed=%d\n",
+                        (unsigned)i, st->rready, st->rarmed);
+            if (hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN)) {
+                slots--;
+            } else {
+                /* leave it parked for the next cycle instead of re-parking and
+                 * popping it again in this same loop (that spins forever when
+                 * the push keeps failing while slots is still > 0) */
+                if (hp_ur_dbg)
+                    fprintf(stderr, "[ur] retry-armfail fd=%u slots=%u\n",
+                            (unsigned)i, slots);
+                hp_ur_retfd((hp_sock)i);
+                break;
+            }
+        } else if (hp_ur_dbg) {
+            fprintf(stderr, "[ur] retry-skip fd=%u rh=%d rready=%d rarmed=%d\n",
+                    (unsigned)i, st->rh ? 1 : 0, st->rready, st->rarmed);
         }
     }
     /* deferred closes: the send chain drained (or the peer is gone for

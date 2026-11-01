@@ -470,6 +470,14 @@ class Server {
              * reconnect per request instead and stay fast. */
             if (uring_active() && $this->shedAt > 28000) { $this->shedAt = 28000; }
         }
+        /* Operator override (tests, capacity experiments): the shed regime is
+         * the churn regime, so being able to force it locally is how the
+         * accept/close path gets measured without 28k live sockets. */
+        $shedEnv = getenv("HPHP_SHED_AT");
+        if ($shedEnv != "") {
+            $sv = intval($shedEnv);
+            if ($sv > 0) { $this->shedAt = $sv; }
+        }
 
         $codes = [200, 201, 400, 401, 404, 500, 503];
         $texts = ["OK", "Created", "Bad Request", "Unauthorized",

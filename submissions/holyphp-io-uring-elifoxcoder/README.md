@@ -185,6 +185,23 @@ After both: RSS flat at 14.6 MB over 810k requests (three 30 s windows at
 9k rps), `live_allocs` flat, `str_new` 0.02/req, `send_chunk` 0.00/req,
 `enter` 0.95/req, 42/42 tests green.
 
+#### Shed-path crash found by ASAN (`…`)
+
+The shed regime (above the ring's 28k connection cap) is the churn regime:
+every response says `Connection: close`, so the server accepts and closes a
+connection per request. An ASAN build under exactly that load (3000 req/s,
+shed threshold forced to 32) crashed in the array hash index:
+`unset()` on an empty map computed `len - 1` and touched one element before
+`keys[]`, because the index could hold a duplicate entry that survived a
+delete and pointed past the live range. The duplicate came from
+`hp_arr_index_add` inserting the key again after a rebuild that had already
+indexed it. Fixed in the runtime (plus `array_pop`/`array_shift` index
+maintenance); the recv re-arm is also deferred to the next wait cycle so the
+kernel cannot overwrite the buffer while the handler still parses it.
+Before: every run died (`mremap_chunk` / `realloc invalid old size` /
+segfault). After: 3/3 runs alive, zero ASAN reports.
+
+
 
 
 The 64,000 at `c935dfe` was a bug (EAGAIN treated as fatal in the non-blocking
