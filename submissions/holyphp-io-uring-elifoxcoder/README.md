@@ -243,6 +243,27 @@ Local numbers (WSL, my machine, not box numbers): like 151 → 136 µs cold and
 61.5 µs at 4k rps; the user-model mix 76.1 → 74.9 µs at 200 VUs. The box run
 is what counts.
 
+#### The wakeup round (`abf7a6d`): one `io_uring_enter` serves many requests
+
+Measured on one machine against the C submission (`c-iouring-public`, #2),
+same seed, same user model, alternating runs:
+
+| | C submission | HolyPHP before | HolyPHP after |
+|---|---:|---:|---:|
+| `/health` µs/req | 40.8 / 39.8 | 98.8 / 100.8 | **40.5 / 41.0** |
+| user-model mix µs/req | 40.5 / 40.3 | 129.6 / 194.5 | **47.6 / 45.3** |
+| `io_uring_enter` per request | — | 1.63 | **0.14** |
+
+The gap was not the generated code: the C submission's loop waits for up to
+128 completions or 2 ms while it has work, so one wakeup serves a batch of
+requests. Ours waited for exactly one completion per cycle. `hp_uring_wait`
+now does the same (64 completions / 2 ms while busy, block for the first
+completion when idle), and `hp_uring_enter` takes microseconds.
+
+That took the trivial path to parity with C and the mix from 1.8× to
+1.12–1.18×. The batching costs latency: median 2.5 ms, p95 4.6 ms, p99
+6.3 ms locally — far inside the box's p95 < 500 ms.
+
 
 
 
