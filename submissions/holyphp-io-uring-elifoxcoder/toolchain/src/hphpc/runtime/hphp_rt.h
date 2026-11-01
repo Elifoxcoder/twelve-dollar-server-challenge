@@ -410,6 +410,8 @@ hval hpbi_strchr(hval h, hval n);
 hval hpbi_strpos(hval h, hval n, hval off);
 hval hpbi_str_pos_ci(hval h, hval n, hval off);
 hval hpbi_str_prefix_ci(hval s, hval p);
+hval hpbi_str_int_range(hval s, hval a, hval b);
+hval hpbi_str_trim_range(hval s, hval a, hval b);
 hval hpbi_str_at_eq(hval s, hval start, hval len, hval lit);
 hval hpbi_str_to_int(hval s);
 hval hpbi_str_contains(hval h, hval n);

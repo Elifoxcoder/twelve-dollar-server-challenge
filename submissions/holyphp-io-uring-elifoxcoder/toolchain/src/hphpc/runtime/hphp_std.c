@@ -235,6 +235,45 @@ hval hpbi_str_pos_ci(hval h, hval n, hval off) {
     return hp_of_bool(false);
 }
 
+/* str_int_range(s, start, end): decimal integer in [start,end) without
+ * building a substring (Content-Length parsing). */
+hval hpbi_str_int_range(hval s, hval a, hval b) {
+    hstr *x = hp_val_to_str(s);
+    int64_t st = hp_val_to_int(a), en = hp_val_to_int(b);
+    if (st < 0) st = 0;
+    if ((size_t)st > x->len) st = (int64_t)x->len;
+    if (en < st) en = st;
+    if ((size_t)en > x->len) en = (int64_t)x->len;
+    int64_t v = 0;
+    int neg = 0;
+    size_t i = (size_t)st;
+    while (i < (size_t)en && (x->data[i] == ' ' || x->data[i] == '\t')) i++;
+    if (i < (size_t)en && x->data[i] == '-') { neg = 1; i++; }
+    for (; i < (size_t)en; i++) {
+        char c = x->data[i];
+        if (c < '0' || c > '9') break;
+        v = v * 10 + (c - '0');
+    }
+    return hp_of_int(neg ? -v : v);
+}
+
+/* str_trim_range(s, start, end): the slice trimmed of ASCII whitespace, one
+ * allocation (header values such as the Authorization token). */
+hval hpbi_str_trim_range(hval s, hval a, hval b) {
+    hstr *x = hp_val_to_str(s);
+    int64_t st = hp_val_to_int(a), en = hp_val_to_int(b);
+    if (st < 0) st = 0;
+    if ((size_t)st > x->len) st = (int64_t)x->len;
+    if (en < st) en = st;
+    if ((size_t)en > x->len) en = (int64_t)x->len;
+    size_t i = (size_t)st, e = (size_t)en;
+    while (i < e && (x->data[i] == ' ' || x->data[i] == '\t' ||
+                     x->data[i] == '\r' || x->data[i] == '\n')) i++;
+    while (e > i && (x->data[e - 1] == ' ' || x->data[e - 1] == '\t' ||
+                     x->data[e - 1] == '\r' || x->data[e - 1] == '\n')) e--;
+    return hp_of_str(hp_str_new(x->data + i, e - i));
+}
+
 /* str_prefix_ci(s, p): true when s starts with p, ASCII case-insensitive. */
 hval hpbi_str_prefix_ci(hval s, hval p) {
     hstr *x = hp_val_to_str(s);

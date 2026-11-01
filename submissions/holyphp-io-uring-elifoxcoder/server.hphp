@@ -719,30 +719,28 @@ class Server {
                 continue;
             }
 
-            $head = substr($buf, 0, $he);
             $method = substr($buf, 0, $sp1);
             $path = substr($buf, $ps, $pl);
 
             $cl = 0;
             $auth = "";
             if (true) {
-                /* case-insensitive in place: strtolower($head) copied the
-                 * whole header once per request */
-                $k = str_pos_ci($head, "\r\ncontent-length:", 0);
-                if ($k !== false) {
-                    $e = strpos($head, "\r\n", intval($k) + 2);
-                    if ($e === false) { $e = strlen($head); }
-                    $cl = intval(substr($head, intval($k) + 17, intval($e) - (intval($k) + 17)));
+                /* scan the request buffer itself, bounded by the end of the
+                 * header: no substr($buf, 0, $he) copy per request */
+                $k = str_pos_ci($buf, "\r\ncontent-length:", 0);
+                if ($k !== false && intval($k) < $he) {
+                    $e = strpos($buf, "\r\n", intval($k) + 2);
+                    if ($e === false || intval($e) > $he) { $e = $he; }
+                    $cl = str_int_range($buf, intval($k) + 17, intval($e));
                 }
-                $ak = str_pos_ci($head, "\r\nauthorization:", 0);
-                if ($ak !== false) {
-                    $ae = strpos($head, "\r\n", intval($ak) + 2);
-                    if ($ae === false) { $ae = strlen($head); }
-                    $auth = trim(substr($head, intval($ak) + 16, intval($ae) - (intval($ak) + 16)));
+                $ak = str_pos_ci($buf, "\r\nauthorization:", 0);
+                if ($ak !== false && intval($ak) < $he) {
+                    $ae = strpos($buf, "\r\n", intval($ak) + 2);
+                    if ($ae === false || intval($ae) > $he) { $ae = $he; }
+                    $auth = str_trim_range($buf, intval($ak) + 16, intval($ae));
                 }
             }
-            if ($cl < 0 || $cl > 1048576) {
-                $this->close_fd($fd);
+            if ($cl < 0 || $cl > 1048576) {                $this->close_fd($fd);
                 return;
             }
 

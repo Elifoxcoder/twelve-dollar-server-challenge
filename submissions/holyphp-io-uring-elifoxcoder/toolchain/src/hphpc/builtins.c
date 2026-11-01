@@ -90,6 +90,8 @@ void builtins_init(void) {
     add("json_num_field",   B_MISC, ty_int,    false, false);  /* (json, key) -> int|-1 */
     add("str_pos_ci",       B_MISC, ty_mixed,  false, false);  /* (hay, needle[, off]) -> int|false */
     add("str_prefix_ci",    B_MISC, ty_bool,   false, false);  /* (s, prefix) -> bool */
+    add("str_int_range",    B_MISC, ty_int,    false, false);  /* (s, start, end) -> int */
+    add("str_trim_range",   B_MISC, ty_string, false, false);  /* (s, start, end) -> trimmed slice */
     add("password_hash",    B_STR1, ty_string, false, false);
     add("password_verify",  B_STR2, ty_bool,   false, false);
     add("random_bytes",     B_INT_INT, ty_string, false, false);
