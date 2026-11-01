@@ -2491,6 +2491,10 @@ static _Thread_local int g_epfd = -1;
  * working set. Larger requests arrive in chunks and the app concatenates
  * partial buffers, so nothing is lost. */
 #define HP_UR_RLEN_DEF    1024
+/* Batching while the server has work: one wakeup serves up to this many
+ * completions, waiting at most this long (the C submissions use 128 / 2 ms). */
+#define HP_UR_BATCH       64
+#define HP_UR_BATCH_US    2000
 
 /* Recv buffer size per connection, overridable at run time (HPHP_RECV_LEN)
  * so the size can be A/B-tested on one binary. */
@@ -2615,6 +2619,7 @@ static _Thread_local int hp_ur_epfd = -1;
 static _Thread_local int hp_ur_ep_conns = 0;
 static _Thread_local int hp_ur_ring_conns = 0;
 static _Thread_local int hp_ur_ring_max = -1;
+static _Thread_local int hp_ur_busy = 0;   /* the last wakeup had completions */
 
 static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
 static _Thread_local int hp_ur_fd = -1;
@@ -2703,7 +2708,7 @@ static void hp_ur_drop_send_chain(struct hp_urfds *st) {
     st->squeued = 0;
 }
 
-static long hp_ur_enter(long to_submit, long min_complete, int wait_ms);
+static long hp_ur_enter(long to_submit, long min_complete, int wait_us);
 static bool hp_ur_arm_send_head(hp_sock fd);
 static void hp_ur_free_fd(hp_sock fd);
 static void hp_ur_ep_del(hp_sock fd);
@@ -2764,15 +2769,15 @@ static void hp_ur_free_fd(hp_sock fd) {
     st->epoch = e;
 }
 
-static long hp_ur_enter(long to_submit, long min_complete, int wait_ms) {
+static long hp_ur_enter(long to_submit, long min_complete, int wait_us) {
     hp_st[HP_ST_ENTER]++;
     hp_st[HP_ST_SQE_SUB] += (uint64_t)(to_submit > 0 ? to_submit : 0);
-    if (wait_ms < 0) return syscall(SYS_io_uring_enter, (long)hp_ur_fd,
+    if (wait_us < 0) return syscall(SYS_io_uring_enter, (long)hp_ur_fd,
                                     to_submit, min_complete,
                                     HP_UR_ENTER_GET, 0L, 0L);
     struct timespec ts;
-    ts.tv_sec = wait_ms / 1000;
-    ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+    ts.tv_sec = wait_us / 1000000;
+    ts.tv_nsec = (long)(wait_us % 1000000) * 1000L;
     /* IORING_ENTER_EXT_ARG expects a struct io_uring_getevents_arg, not a
      * bare timespec: sigmask, sigmask_sz, pad, ts-pointer. Passing the
      * timespec itself made the kernel reject the call with EINVAL, so the
@@ -2793,12 +2798,12 @@ static long hp_ur_enter(long to_submit, long min_complete, int wait_ms) {
     /* Old kernel without the ext-arg timeout: poll the ring fd for the
      * timeout, then submit without waiting. Never fall back to an unbounded
      * enter -- that can sleep forever when nothing is armed. */
-    if (wait_ms > 0) {
+    if (wait_us > 0) {
         struct pollfd pf;
         pf.fd = hp_ur_fd;
         pf.events = POLLIN;
         pf.revents = 0;
-        (void)poll(&pf, 1, wait_ms);
+        (void)poll(&pf, 1, (wait_us + 999) / 1000);
     }
     return syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit, 0,
                    HP_UR_ENTER_GET, 0L, 0L);
@@ -3183,21 +3188,32 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
          * them; overflow fds go straight into the ready list. */
         hp_ur_enter(to_submit, 0, 0);
         struct epoll_event evs[64];
-        int n = epoll_wait(hp_ur_epfd, evs, 64, timeout_ms);
+        int ep_to = hp_ur_busy ? (HP_UR_BATCH_US / 1000) : timeout_ms;
+        int n = epoll_wait(hp_ur_epfd, evs, 64, ep_to);
         for (int i = 0; i < n; i++) {
             int efd = evs[i].data.fd;
             if (efd == (int)hp_ur_fd) continue;   /* ring: drained below */
             if (in) hp_arr_push(in, hp_of_int(efd));
         }
     } else {
-        hp_ur_enter(to_submit, 1, have > 0 ? 0 : timeout_ms);
+        /* Batching, like the fast C servers: while the last cycle had work,
+         * wait for up to HP_UR_BATCH completions or HP_UR_BATCH_US
+         * microseconds, so one wakeup serves many requests. Idle waits block
+         * until the first completion. */
+        int min = 1;
+        int wait_us = timeout_ms * 1000;
+        if (have > 0) { min = 0; wait_us = 0; }
+        else if (hp_ur_busy) { min = HP_UR_BATCH; wait_us = HP_UR_BATCH_US; }
+        hp_ur_enter(to_submit, min, wait_us);
     }
 
+    int drained = 0;
     for (;;) {
         uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
         if (head == tail) break;
         struct hp_uring_cqe *c = hp_ur_cqes + (head & hp_ur_cqmask);
         head++;
+        drained = 1;
         hp_st[HP_ST_CQE]++;
         uint64_t ud = c->user_data;
         int kind = (int)(ud & HP_UR_KIND);
@@ -3286,6 +3302,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
     }
     __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
     hp_ur_cqhead = head;
+    hp_ur_busy = drained;
     /* an fd whose SQE push hit a full ring is parked in the retry ring and
      * re-armed here, after the CQE drain freed slots up. In the common case
      * the ring is empty and this costs nothing; the rare overflow flag
