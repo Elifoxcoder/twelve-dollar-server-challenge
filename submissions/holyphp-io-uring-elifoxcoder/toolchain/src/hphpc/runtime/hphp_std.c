@@ -5278,6 +5278,69 @@ hval hpbi_jwt_verify(hval tok, hval secret, hval now) {
                                      hp_val_to_int(now)));
 }
 
+/* json_str_field(json, key) / json_num_field(json, key): read one field of a
+ * flat JSON object in place. The PHP helper built the key with two
+ * concatenations and cut the value with substr; these scan and copy once. */
+hstr *hp_json_str_field_t(hstr *j, hstr *key) {
+    const char *v;
+    size_t vl;
+    bool q;
+    if (!j || !key) return hp_str_lit("");
+    if (!hp_json_field(j->data, j->len, key->data, key->len, &v, &vl, &q))
+        return hp_str_lit("");
+    if (!q) return hp_str_lit("");
+    bool esc = false;
+    for (size_t i = 0; i < vl; i++)
+        if (v[i] == '\\') { esc = true; break; }
+    if (!esc) return hp_str_new(v, vl);
+    char *tmp = (char *)malloc(vl + 1);
+    if (!tmp) return hp_str_lit("");
+    size_t o = 0;
+    for (size_t i = 0; i < vl; i++) {
+        if (v[i] == '\\' && i + 1 < vl) {
+            char c = v[++i];
+            switch (c) {
+            case 'n': tmp[o++] = '\n'; break;
+            case 't': tmp[o++] = '\t'; break;
+            case 'r': tmp[o++] = '\r'; break;
+            case 'b': tmp[o++] = '\b'; break;
+            case 'f': tmp[o++] = '\f'; break;
+            default:  tmp[o++] = c;    break;
+            }
+        } else {
+            tmp[o++] = v[i];
+        }
+    }
+    hstr *r = hp_str_new(tmp, o);
+    free(tmp);
+    return r;
+}
+int64_t hp_json_num_field_t(hstr *j, hstr *key) {
+    const char *v;
+    size_t vl;
+    bool q;
+    if (!j || !key) return -1;
+    if (!hp_json_field(j->data, j->len, key->data, key->len, &v, &vl, &q))
+        return -1;
+    if (q || vl == 0) return -1;
+    int64_t n = 0;
+    size_t i = 0;
+    bool neg = false;
+    if (v[0] == '-') { neg = true; i = 1; }
+    if (i >= vl) return -1;
+    for (; i < vl; i++) {
+        if (v[i] < '0' || v[i] > '9') return -1;
+        n = n * 10 + (v[i] - '0');
+    }
+    return neg ? -n : n;
+}
+hval hpbi_json_str_field(hval j, hval k) {
+    return hp_of_str(hp_json_str_field_t(hp_val_to_str(j), hp_val_to_str(k)));
+}
+hval hpbi_json_num_field(hval j, hval k) {
+    return hp_of_int(hp_json_num_field_t(hp_val_to_str(j), hp_val_to_str(k)));
+}
+
 /* PBKDF2-HMAC-SHA256, PHP password_hash's bcrypt-format output with
  * prefix changed to our own "$hphp$" scheme (bcrypt itself is out of scope). */
 static void hp_pbkdf2_sha256(const unsigned char *pw, size_t pwlen,

@@ -1125,12 +1125,12 @@ class Server {
         $pj = jwt_verify($tok, $this->secret, time());
         if ($pj == "") { return [2]; }
 
-        $sub = $this->json_str($pj, "sub");
+        $sub = json_str_field($pj, "sub");
         if ($sub == "") { return [3]; }
         $uid = $this->parse_id($sub);
         if ($uid <= 0) { return [3]; }
 
-        $name = $this->json_str($pj, "username");
+        $name = json_str_field($pj, "username");
         if ($name == "") { return [3]; }
         return [0, $uid, $name];
     }

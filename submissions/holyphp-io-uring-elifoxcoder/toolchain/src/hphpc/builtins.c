@@ -86,6 +86,8 @@ void builtins_init(void) {
     add("sha256",           B_STR1, ty_string, false, false);
     add("hash_hmac",        B_MISC, ty_mixed,  false, false);  /* (algo, data, key[, raw]) */
     add("jwt_verify",       B_MISC, ty_string, false, false);  /* (token, secret, now) -> payload|"" */
+    add("json_str_field",   B_MISC, ty_string, false, false);  /* (json, key) -> value|"" */
+    add("json_num_field",   B_MISC, ty_int,    false, false);  /* (json, key) -> int|-1 */
     add("str_pos_ci",       B_MISC, ty_mixed,  false, false);  /* (hay, needle[, off]) -> int|false */
     add("str_prefix_ci",    B_MISC, ty_bool,   false, false);  /* (s, prefix) -> bool */
     add("password_hash",    B_STR1, ty_string, false, false);
