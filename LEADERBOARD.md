@@ -26,8 +26,8 @@ its follow-up PR #218 (`15b3d62`); its earlier #202 run (`cc1105c`) held 60,000 
 #229 (`f0fb733`; 270,000 passed the 2-minute probe, but the 5-minute holds at 270,000, 257,000 and 244,000 failed on p99
 at 0 % errors);
 its #216 run (`ee683db`) and #211 run (`7ff01df`) held 270,000, its #223 run (`5eebfe2`) 257,000 and its earlier #198
-run (`bb6aee1`) 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #226
-(`a343a03`); its earlier #205 run (`6271ee8`) held 133,000. c-iouring-shivanshthapliyal is scored at its follow-up PR
+run (`bb6aee1`) 226,000. dexlang-iouring-ensamuel7 is scored at its follow-up PR #236
+(`9ed9f2e`); its #226 run (`a343a03`) held 140,000 and its earlier #205 run (`6271ee8`) held 133,000. c-iouring-shivanshthapliyal is scored at its follow-up PR
 #230 (`b32c4ee`); its earlier #214 run (`9844f31`) held 238,000. sql-sqlite3cli-public is scored at its follow-up PR
 #232 (`1319a07`); its earlier #219 run (`3f7cab9`) held 6,000.
 
@@ -77,10 +77,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 34 | go-epoll-unorig-username | #186 | Go (raw epoll, cgo SQLite) | **165,000** | 16,020 | 479 | 952 | 0.00 | 97 | 56 | 665 | 2026-10-29 |
 | 35 | asm-epoll-HauLTCE | #207 | x86-64 asm (epoll, forked workers) | **160,000** ᵃ | 15,682 | 291 | 757 | 0.61 | 95 | 56 | 1,307 | 2026-10-30 |
 | 36 | java-uring-crux | #170 | Java (FFM io_uring, C row formatter) | **158,000** | 15,531 | 137 | 312 | 0.00 | 72 | 43 | 1,139 | 2026-10-29 |
-| 37 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
-| 38 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
-| 39 | holyphp-io-uring-elifoxcoder | #235 | HolyPHP (io_uring, SQLite B-tree reads) | **145,000** ᵘ | 14,093 | 342 | 562 | 0.00 | 91 | 60 | 447 | 2026-11-01 |
-| 40 | dexlang-iouring-ensamuel7 | #226 | DexLang (generated C, io_uring) | **140,000** | 13,726 | 97 | 272 | 0.00 | 78 | 53 | 708 | 2026-10-31 |
+| 37 | dexlang-iouring-ensamuel7 | #236 | DexLang (generated C, io_uring) | **157,000** | 15,383 | 108 | 845 | 0.00 | 76 | 46 | 662 | 2026-11-01 |
+| 38 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
+| 39 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
+| 40 | holyphp-io-uring-elifoxcoder | #235 | HolyPHP (io_uring, SQLite B-tree reads) | **145,000** ᵘ | 14,093 | 342 | 562 | 0.00 | 91 | 60 | 447 | 2026-11-01 |
 | 41 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
 | 41 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
 | 41 | cider-iouring-pomilon | #208 | Cider (native x86-64, io_uring) | **135,000** | 13,168 | 256 | 489 | 0.00 | 88 | 62 | 425 | 2026-10-30 |
