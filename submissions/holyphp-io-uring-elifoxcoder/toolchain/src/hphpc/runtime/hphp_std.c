@@ -2442,7 +2442,9 @@ struct hp_urchunk {
 struct hp_urfds {
     struct hp_urchunk *shead, *stail;     /* queued send chain */
     int    squeued;
-    char  *rbuf;                          /* recycled recv buffer */
+    hstr *rh;                             /* recv target as a live hstr:
+                                              the kernel writes data[], the
+                                              app gets it without a copy */
     size_t rcap;
     size_t rlen;                          /* fresh bytes available */
     int    rarmed;                        /* a recv SQE is queued or in flight */
@@ -2592,7 +2594,7 @@ static void hp_ur_free_fd(hp_sock fd) {
         }
     }
     hp_ur_drop_send_chain(st);
-    free(st->rbuf);
+    free(st->rh);            /* plain calloc'd hstr block, no refcount */
     uint32_t e = st->epoch + 1;          /* keep escalating so fd-reuse
                                             completions always mismatch */
     memset(st, 0, sizeof *st);
@@ -2705,22 +2707,34 @@ static uint64_t hp_ur_ud(struct hp_urfds *st, hp_sock fd, int kind) {
          | (uint64_t)kind;
 }
 
-/* Track (never double-track) one recv per fd. The buffer is recycled across
- * EAGAIN cycles; a data completion hands it to the app and the app's consume
- * frees it and arms a fresh one. */
+/* Track (never double-track) one recv per fd. The kernel fills this
+ * connection's own hstr block (allocated once, flag scoped so the app's
+ * persist/concopy paths copy and free skips it); on a data completion the
+ * exact same hstr is handed out, so a request costs zero recv copies and
+ * zero recv string allocations. */
 static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || st->rarmed || st->reof || st->listener) return false;
-    if (!st->rbuf) {
+    if (!st->rh) {
         if (want < HP_UR_RECV_LEN) want = HP_UR_RECV_LEN;
-        st->rbuf = (char *)malloc(want);
-        if (!st->rbuf) return false;
+        /* hstr layout with inline data; one extra byte so data[want] can
+         * hold the NUL after a full 4096-byte read */
+        hstr *h = (hstr *)hp_alloc(sizeof(hstr) + want + 1);
+        if (!h) return false;
+        h->len = 0;
+        h->cap = want + 1;
+        h->hash = 0;
+        h->rc = 1;
+        h->flags = HP_F_SCOPED;   /* persist copies, hp_str_free skips */
+        h->data[0] = 0;
+        st->rh = h;
         st->rcap = want;
     }
     if (want > st->rcap) {
-        char *nb = (char *)realloc(st->rbuf, want);
+        hstr *nb = (hstr *)realloc(st->rh, sizeof(hstr) + want + 1);
         if (!nb) return false;
-        st->rbuf = nb;
+        nb->cap = want + 1;
+        st->rh = nb;
         st->rcap = want;
     }
     struct hp_uring_sqe s;
@@ -2728,7 +2742,7 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     s.opcode = HP_UR_OP_RECV;
     hp_st[HP_ST_ARM_RECV]++;
     s.fd = (int)fd;
-    s.addr = (uint64_t)(uintptr_t)st->rbuf;
+    s.addr = (uint64_t)(uintptr_t)st->rh->data;
     s.len = (uint32_t)st->rcap;
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_RECV);
     if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
@@ -2820,21 +2834,37 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
     return (int64_t)n;
 }
 
-/* Return the fresh bytes for fd. The ring only pushes an fd into the ready
- * list when its recv completed with data, so this copies out and re-arms the
- * same buffer -- a read costs zero syscalls and zero malloc. */
+/* Return the fresh bytes for fd. The kernel wrote them into this
+ * connection's own hstr block, so handout is a pointer, not a copy -- a
+ * read costs zero syscalls, zero malloc and zero memcpy. The block is
+ * handed out exactly once (the rready gate) and the scene: with the ring
+ * re-armed the next packet overwrites it, which is safe because the app
+ * is done with the previous buffer by the time it consumed the request
+ * (parse is synchronous; anything it retains goes through persist/concat,
+ * which copy because the block carries HP_F_SCOPED). The hash is reset
+ * each handout since the bytes mutate. */
 static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || !st->rready) return hp_str_lit("");
     size_t avail = st->rlen < maxall ? st->rlen : maxall;
-    hstr *out = avail ? hp_str_new(st->rbuf, avail) : hp_str_lit("");
-    if (avail && (size_t)avail >= st->rlen) {
+    if (avail < st->rlen) {
+        /* caller asks for fewer bytes than arrived (rare; the challenge app
+         * always reads HP_UR_RECV_LEN): hand out a copy of the head and
+         * keep the rest queued, like the classic path. */
+        hstr *out = hp_str_new(st->rh->data, avail);
+        st->rh->hash = 0;
+        return out;
+    }
+    st->rh->len = avail;
+    st->rh->hash = 0;
+    st->rh->data[avail] = 0;
+    if (avail) {
         st->rready = 0;
         st->rlen = 0;
         st->rarmed = 0;
-        hp_uring_arm_recv(fd, maxall);
+        hp_uring_arm_recv(fd, (size_t)st->rcap);
     }
-    return out;
+    return st->rh;
 }
 
 /* Submit everything queued since the last cycle, wait up to timeout_ms for
@@ -2969,7 +2999,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             else hp_ur_retfd((hp_sock)i);
         }
         if (slots == 0) { hp_ur_retfd((hp_sock)i); continue; }  /* recv next cycle */
-        if (st->rbuf && !st->rready && !st->rarmed) {
+        if (st->rh && !st->rready && !st->rarmed) {
             if (hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN)) slots--;
             else hp_ur_retfd((hp_sock)i);
         }
@@ -3015,7 +3045,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             }
             if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
                 hp_ur_retfd((hp_sock)i);
-            if (st->rbuf && !st->rready && !st->rarmed &&
+            if (st->rh && !st->rready && !st->rarmed &&
                 !hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN))
                 hp_ur_retfd((hp_sock)i);
         }
