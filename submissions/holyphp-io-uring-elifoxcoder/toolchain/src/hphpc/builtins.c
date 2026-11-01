@@ -85,6 +85,9 @@ void builtins_init(void) {
     /* crypto */
     add("sha256",           B_STR1, ty_string, false, false);
     add("hash_hmac",        B_MISC, ty_mixed,  false, false);  /* (algo, data, key[, raw]) */
+    add("jwt_verify",       B_MISC, ty_string, false, false);  /* (token, secret, now) -> payload|"" */
+    add("str_pos_ci",       B_MISC, ty_mixed,  false, false);  /* (hay, needle[, off]) -> int|false */
+    add("str_prefix_ci",    B_MISC, ty_bool,   false, false);  /* (s, prefix) -> bool */
     add("password_hash",    B_STR1, ty_string, false, false);
     add("password_verify",  B_STR2, ty_bool,   false, false);
     add("random_bytes",     B_INT_INT, ty_string, false, false);

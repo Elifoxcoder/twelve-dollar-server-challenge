@@ -104,6 +104,7 @@ struct hstr {
 };
 
 hstr *hp_str_lit(const char *cstr);
+hstr *hp_char_str(unsigned char c);   /* shared 1-byte string (never freed) */
 hstr *hp_str_intern(const char *cstr);   /* cached literal, rc == 0 */
 /* Request scope: strings allocated between begin/end are released in one
  * shot by hp_scope_end(). Values that must outlive the scope are copied out
@@ -407,6 +408,8 @@ hval hpbi_substr(hval s, hval start, hval len);
 hval hpbi_strstr(hval h, hval n);
 hval hpbi_strchr(hval h, hval n);
 hval hpbi_strpos(hval h, hval n, hval off);
+hval hpbi_str_pos_ci(hval h, hval n, hval off);
+hval hpbi_str_prefix_ci(hval s, hval p);
 hval hpbi_str_at_eq(hval s, hval start, hval len, hval lit);
 hval hpbi_str_to_int(hval s);
 hval hpbi_str_contains(hval h, hval n);
@@ -438,6 +441,8 @@ hval hpbi_preg_grep(hval pat, hval arr);
 /* ---- crypto ---- */
 hval hpbi_sha256(hval s);
 hval hpbi_hash_hmac(hval algo, hval data, hval key, hval raw_output);
+hval hpbi_jwt_verify(hval tok, hval secret, hval now);
+hstr *hp_jwt_verify_t(hstr *tok, hstr *secret, int64_t now);
 hval hpbi_password_hash(hval pw);
 hval hpbi_password_verify(hval pw, hval hash);
 hval hpbi_random_bytes(hval n);

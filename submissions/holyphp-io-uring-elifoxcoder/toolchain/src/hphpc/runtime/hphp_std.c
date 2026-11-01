@@ -203,6 +203,49 @@ hval hpbi_strstr(hval h, hval n) {
     RETS(hp_str_slice(hp_val_to_str(h), i, hp_str_len(hp_val_to_str(h))));
 }
 hval hpbi_strchr(hval h, hval n) { return hpbi_strstr(h, n); }
+
+/* ASCII case-insensitive compare of one byte */
+static int hp_ci_eq(unsigned char a, unsigned char b) {
+    if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + 32);
+    if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + 32);
+    return a == b;
+}
+
+/* str_pos_ci(hay, needle, off): like strpos but ASCII case-insensitive and
+ * in place. Exists so header scanning does not strtolower() the whole header
+ * first (that copy was one allocation per request). */
+hval hpbi_str_pos_ci(hval h, hval n, hval off) {
+    hstr *hay = hp_val_to_str(h);
+    hstr *nee = hp_val_to_str(n);
+    long long o = (hp_tag(off) == HV_NULL) ? 0 : off.u.i;
+    if (o < 0) o = 0;
+    if ((size_t)o > hay->len) return hp_of_bool(false);
+    size_t hlen = hay->len - (size_t)o;
+    if (nee->len == 0) return hp_of_int((int64_t)o);
+    if (nee->len <= hlen) {
+        for (size_t i = 0; i + nee->len <= hlen; i++) {
+            size_t j = 0;
+            while (j < nee->len &&
+                   hp_ci_eq((unsigned char)hay->data[o + i + j],
+                            (unsigned char)nee->data[j]))
+                j++;
+            if (j == nee->len) return hp_of_int((int64_t)o + (int64_t)i);
+        }
+    }
+    return hp_of_bool(false);
+}
+
+/* str_prefix_ci(s, p): true when s starts with p, ASCII case-insensitive. */
+hval hpbi_str_prefix_ci(hval s, hval p) {
+    hstr *x = hp_val_to_str(s);
+    hstr *y = hp_val_to_str(p);
+    if (y->len > x->len) return hp_of_bool(false);
+    for (size_t i = 0; i < y->len; i++)
+        if (!hp_ci_eq((unsigned char)x->data[i], (unsigned char)y->data[i]))
+            return hp_of_bool(false);
+    return hp_of_bool(true);
+}
+
 hval hpbi_strpos(hval h, hval n, hval off) {
     hstr *hay = hp_val_to_str(h);
     hstr *nee = hp_val_to_str(n);
@@ -896,7 +939,7 @@ hval hpbi_ord(hval s) {
 }
 hval hpbi_chr(hval n) {
     char c = (char)hp_val_to_int(n);
-    RETS(hp_str_new(&c, 1));
+    RETS(hp_char_str((unsigned char)c));   /* shared 1-byte string: no alloc */
 }
 hval hpbi_bin2hex(hval s) {
     hstr *x = hp_val_to_str(s);
@@ -4947,6 +4990,163 @@ hval hpbi_hash_hmac(hval algo, hval data, hval key, hval raw_output) {
     char hex[65];
     for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", mac[i]);
     RETS(hp_str_lit(hex));
+}
+
+/* ---- JWT (HS256) verification ---------------------------------------------
+ * jwt_verify(token, secret, now): header.payload.signature, base64url without
+ * padding. The signature is HMAC-SHA256 over "header.payload" and must match
+ * in constant time, the header must say HS256, and the payload must carry a
+ * numeric exp >= now. On success the decoded payload is returned (one
+ * allocation); on any failure "" (no allocation). Generic: it is the standard
+ * JWT check, not an application claim reader -- callers parse their claims.
+ * The PHP-level version built the same check out of substr/concat/base64
+ * calls and allocated ~20 strings per authenticated request. */
+
+static int hp_b64url_decode_into(const char *in, size_t n, char *out, size_t cap) {
+    uint32_t acc = 0;
+    int bits = 0;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        int v = b64_val(in[i]);
+        if (v < 0) continue;
+        acc = (acc << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (o >= cap) return -1;
+            out[o++] = (char)((acc >> bits) & 0xff);
+        }
+    }
+    return (int)o;
+}
+
+static size_t hp_b64url_encode_into(const unsigned char *in, size_t n, char *out) {
+    static const char tab[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    size_t o = 0;
+    size_t i = 0;
+    for (; i + 2 < n; i += 3) {
+        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8) | in[i + 2];
+        out[o++] = tab[(v >> 18) & 63];
+        out[o++] = tab[(v >> 12) & 63];
+        out[o++] = tab[(v >> 6) & 63];
+        out[o++] = tab[v & 63];
+    }
+    if (n - i == 1) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        out[o++] = tab[(v >> 18) & 63];
+        out[o++] = tab[(v >> 12) & 63];
+    } else if (n - i == 2) {
+        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8);
+        out[o++] = tab[(v >> 18) & 63];
+        out[o++] = tab[(v >> 12) & 63];
+        out[o++] = tab[(v >> 6) & 63];
+    }
+    return o;
+}
+
+/* first occurrence of "key" : <value> in a flat JSON object; value is either a
+ * quoted string (quotes stripped) or a bare token up to , } or space */
+static bool hp_json_field(const char *j, size_t n, const char *key, size_t klen,
+                          const char **val, size_t *vlen, bool *quoted) {
+    for (size_t i = 0; i + klen + 2 <= n; i++) {
+        if (j[i] != '"') continue;
+        if (memcmp(j + i + 1, key, klen) != 0) continue;
+        if (j[i + 1 + klen] != '"') continue;
+        size_t p = i + 2 + klen;
+        while (p < n && (j[p] == ' ' || j[p] == '\t')) p++;
+        if (p >= n || j[p] != ':') continue;
+        p++;
+        while (p < n && (j[p] == ' ' || j[p] == '\t')) p++;
+        if (p < n && j[p] == '"') {
+            size_t s = ++p;
+            while (p < n && j[p] != '"') p++;
+            if (p >= n) return false;
+            *val = j + s;
+            *vlen = p - s;
+            *quoted = true;
+            return true;
+        }
+        size_t s = p;
+        while (p < n && j[p] != ',' && j[p] != '}' && j[p] != ' ' && j[p] != '\n') p++;
+        *val = j + s;
+        *vlen = p - s;
+        *quoted = false;
+        return true;
+    }
+    return false;
+}
+
+hstr *hp_jwt_verify_t(hstr *tok, hstr *secret, int64_t now) {
+    if (!tok || !secret || tok->len < 8) return hp_str_lit("");
+    const char *t = tok->data;
+    size_t n = tok->len;
+    size_t p1 = n, p2 = n;
+    int dots = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (t[i] != '.') continue;
+        if (++dots == 1) p1 = i;
+        else if (dots == 2) p2 = i;
+        else return hp_str_lit("");            /* a third dot: malformed */
+    }
+    if (dots != 2 || p1 == 0 || p2 == p1 + 1) return hp_str_lit("");
+
+    /* header must be HS256 */
+    char hdr[512];
+    int hl = hp_b64url_decode_into(t, p1, hdr, sizeof hdr);
+    if (hl <= 0) return hp_str_lit("");
+    const char *av; size_t al; bool aq;
+    if (!hp_json_field(hdr, (size_t)hl, "alg", 3, &av, &al, &aq)) return hp_str_lit("");
+    if (!aq || al != 5 || memcmp(av, "HS256", 5) != 0) return hp_str_lit("");
+
+    /* constant-time signature check */
+    unsigned char mac[32];
+    hp_hmac_sha256((const unsigned char *)secret->data, secret->len,
+                   (const unsigned char *)t, p2, mac);
+    char sig[64];
+    size_t sl = hp_b64url_encode_into(mac, 32, sig);
+    size_t sn = n - p2 - 1;
+    if (sn != sl) return hp_str_lit("");
+    unsigned diff = 0;
+    for (size_t i = 0; i < sl; i++)
+        diff |= (unsigned)((unsigned char)sig[i] ^ (unsigned char)t[p2 + 1 + i]);
+    if (diff) return hp_str_lit("");
+
+    /* payload: decode (the one allocation) and check exp */
+    char small[1024];
+    char *pj = small;
+    char *heap = NULL;
+    int pl;
+    if (n - p1 - 1 - (n - p2 - 1) <= sizeof small) {
+        pl = hp_b64url_decode_into(t + p1 + 1, p2 - p1 - 1, small, sizeof small);
+    } else {
+        heap = (char *)malloc(n - p1);
+        if (!heap) return hp_str_lit("");
+        pj = heap;
+        pl = hp_b64url_decode_into(t + p1 + 1, p2 - p1 - 1, heap, n - p1);
+    }
+    if (pl <= 0) { free(heap); return hp_str_lit(""); }
+    const char *ev; size_t el; bool eq;
+    bool has_exp = hp_json_field(pj, (size_t)pl, "exp", 3, &ev, &el, &eq);
+    if (!has_exp || eq) { free(heap); return hp_str_lit(""); }
+    int64_t exp = 0;
+    size_t ei = 0;
+    bool neg = false;
+    if (ei < el && ev[ei] == '-') { neg = true; ei++; }
+    if (ei >= el) { free(heap); return hp_str_lit(""); }
+    for (; ei < el; ei++) {
+        if (ev[ei] < '0' || ev[ei] > '9') { free(heap); return hp_str_lit(""); }
+        exp = exp * 10 + (ev[ei] - '0');
+    }
+    if (neg) exp = -exp;
+    if (exp < now) { free(heap); return hp_str_lit(""); }
+    hstr *out = hp_str_new(pj, (size_t)pl);
+    free(heap);
+    return out;
+}
+hval hpbi_jwt_verify(hval tok, hval secret, hval now) {
+    return hp_of_str(hp_jwt_verify_t(hp_val_to_str(tok), hp_val_to_str(secret),
+                                     hp_val_to_int(now)));
 }
 
 /* PBKDF2-HMAC-SHA256, PHP password_hash's bcrypt-format output with

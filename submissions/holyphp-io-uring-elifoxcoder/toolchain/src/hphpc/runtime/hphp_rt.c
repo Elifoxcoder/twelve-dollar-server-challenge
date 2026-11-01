@@ -198,7 +198,7 @@ static hstr *hp_str_heap_new(const char *bytes, size_t len) {
  * cp_len(), parse_id() and the JSON scanner index a string hundreds of times
  * per request and must not allocate a fresh one-character string each time. */
 static _Thread_local hstr *g_chars[256];
-static hstr *hp_char_str(unsigned char c) {
+hstr *hp_char_str(unsigned char c) {
     if (!g_chars[c]) {
         g_chars[c] = hp_str_heap_new((const char *)&c, 1);
         g_chars[c]->flags = HP_F_STATIC;
