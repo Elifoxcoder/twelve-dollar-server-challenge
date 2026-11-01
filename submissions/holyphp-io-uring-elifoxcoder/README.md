@@ -185,21 +185,35 @@ After both: RSS flat at 14.6 MB over 810k requests (three 30 s windows at
 9k rps), `live_allocs` flat, `str_new` 0.02/req, `send_chunk` 0.00/req,
 `enter` 0.95/req, 42/42 tests green.
 
-#### Shed-path crash found by ASAN (`…`)
+#### Shed-path crash and stall found by ASAN + load (`524fa14`)
 
 The shed regime (above the ring's 28k connection cap) is the churn regime:
 every response says `Connection: close`, so the server accepts and closes a
-connection per request. An ASAN build under exactly that load (3000 req/s,
-shed threshold forced to 32) crashed in the array hash index:
-`unset()` on an empty map computed `len - 1` and touched one element before
-`keys[]`, because the index could hold a duplicate entry that survived a
-delete and pointed past the live range. The duplicate came from
-`hp_arr_index_add` inserting the key again after a rebuild that had already
-indexed it. Fixed in the runtime (plus `array_pop`/`array_shift` index
-maintenance); the recv re-arm is also deferred to the next wait cycle so the
-kernel cannot overwrite the buffer while the handler still parses it.
-Before: every run died (`mremap_chunk` / `realloc invalid old size` /
-segfault). After: 3/3 runs alive, zero ASAN reports.
+connection per request. Two runtime bugs only showed up there:
+
+- **heap corruption**: `unset()` on an empty map computed `len - 1` and
+  touched one element before `keys[]`. The index could hold a duplicate
+  entry (inserted twice when a rebuild ran during the add) that survived a
+  delete and pointed past the live range. Fixed, plus index maintenance in
+  `array_pop`/`array_shift`.
+- **infinite loop**: the open-addressing probe loops had no termination
+  condition. Once churn left the table without a single empty slot, a lookup
+  spun at 100 % CPU and the server stopped answering (measured: 137 of
+  26,855 requests, then dead). Probe loops are bounded now and deletes count
+  their tombstones against the rebuild budget.
+- **the enter timeout never applied**: `IORING_ENTER_EXT_ARG` expects a
+  `struct io_uring_getevents_arg`, not a bare `timespec`; the kernel answered
+  EINVAL and the fallback ran an unbounded enter (blocks forever when nothing
+  is pending). Fixed, with a poll-based fallback for old kernels.
+
+Also: the zero-copy recv re-arm is deferred to the next wait cycle so the
+kernel cannot overwrite the buffer while the handler parses it.
+
+Evidence: ASAN build under churn (3 × 20 s at 3000 req/s, shed threshold 32):
+before, 3/3 runs died; after, 3/3 alive with zero ASAN reports. 9k rps
+keep-alive: 26,855 requests, 0 % errors, server healthy after the run.
+42/42 tests green.
+
 
 
 
