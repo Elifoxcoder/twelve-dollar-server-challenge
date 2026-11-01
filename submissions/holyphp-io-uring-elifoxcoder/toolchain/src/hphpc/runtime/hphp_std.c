@@ -2468,7 +2468,26 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_KIND_POLL   3
 #define HP_UR_KIND        0xff
 #define HP_UR_ENTRIES     65536   /* deep ring: ~60k + live conns at 280k users */
-#define HP_UR_RECV_LEN    4096
+/* Per-connection recv target. Requests are a few hundred bytes (headers plus
+ * at most a 500-character body); 1 KB holds them, and at 60k connections the
+ * buffers total 60 MB instead of 240 MB -- less memory and a smaller cache
+ * working set. Larger requests arrive in chunks and the app concatenates
+ * partial buffers, so nothing is lost. */
+#define HP_UR_RLEN_DEF    1024
+
+/* Recv buffer size per connection, overridable at run time (HPHP_RECV_LEN)
+ * so the size can be A/B-tested on one binary. */
+static _Thread_local int hp_ur_rlen_cfg = 0;
+static size_t hp_ur_rlen(void) {
+    if (!hp_ur_rlen_cfg) {
+        const char *e = getenv("HPHP_RECV_LEN");
+        int v = (e && *e) ? atoi(e) : HP_UR_RLEN_DEF;
+        if (v < 64) v = 64;
+        if (v > 65536) v = 65536;
+        hp_ur_rlen_cfg = v;
+    }
+    return (size_t)hp_ur_rlen_cfg;
+}
 
 /* raw ABI, from include/uapi/linux/io_uring.h */
 struct hp_uring_sqe {
@@ -2879,16 +2898,16 @@ static bool hp_ur_ep_add(hp_sock fd) {
     if (!st) return false;
     if (hp_ur_ep_setup() < 0) return false;
     if (!st->rh) {
-        hstr *h = (hstr *)hp_alloc(sizeof(hstr) + HP_UR_RECV_LEN + 1);
+        hstr *h = (hstr *)hp_alloc(sizeof(hstr) + hp_ur_rlen() + 1);
         if (!h) return false;
         h->len = 0;
-        h->cap = HP_UR_RECV_LEN + 1;
+        h->cap = hp_ur_rlen() + 1;
         h->hash = 0;
         h->rc = 1;
         h->flags = HP_F_SCOPED;
         h->data[0] = 0;
         st->rh = h;
-        st->rcap = HP_UR_RECV_LEN;
+        st->rcap = hp_ur_rlen();
     }
     struct epoll_event ev;
     memset(&ev, 0, sizeof ev);
@@ -2922,7 +2941,7 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     /* overflow connections are watched by epoll, not by an armed SQE */
     if (st->epolled) return true;
     if (!st->rh) {
-        if (want < HP_UR_RECV_LEN) want = HP_UR_RECV_LEN;
+        if (want < hp_ur_rlen()) want = hp_ur_rlen();
         /* hstr layout with inline data; one extra byte so data[want] can
          * hold the NUL after a full 4096-byte read */
         hstr *h = (hstr *)hp_alloc(sizeof(hstr) + want + 1);
@@ -3002,7 +3021,7 @@ static bool hp_uring_add_conn(hp_sock fd) {
     if (hp_ur_ring_conns < hp_ur_ring_max) {
         st->ringconn = 1;
         hp_ur_ring_conns++;
-        return hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+        return hp_uring_arm_recv(fd, hp_ur_rlen());
     }
     return hp_ur_ep_add(fd);
 }
@@ -3074,7 +3093,7 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
     if (st->epolled) {
         /* overflow connection: epoll reported readable, read it now */
         if (!st->rh) return hp_str_lit("");
-        size_t cap = st->rcap ? st->rcap : HP_UR_RECV_LEN;
+        size_t cap = st->rcap ? st->rcap : hp_ur_rlen();
         if (maxall && maxall < cap) cap = maxall;
         ssize_t r = recv(fd, st->rh->data, cap, 0);
         if (r > 0) {
@@ -3094,7 +3113,7 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
     size_t avail = st->rlen < maxall ? st->rlen : maxall;
     if (avail < st->rlen) {
         /* caller asks for fewer bytes than arrived (rare; the challenge app
-         * always reads HP_UR_RECV_LEN): hand out a copy of the head and
+         * always reads the recv length): hand out a copy of the head and
          * keep the rest queued, like the classic path. */
         hstr *out = hp_str_new(st->rh->data, avail);
         st->rh->hash = 0;
@@ -3174,7 +3193,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
                 st->rready = 1;
                 if (in) hp_arr_push(in, hp_of_int(fd));
             } else if (c->res == -EAGAIN || c->res == -EINTR) {
-                hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+                hp_uring_arm_recv(fd, hp_ur_rlen());
             } else {
                 /* 0 = orderly close, negative = hard error. Mirror it into
                  * the app-side socket record: stream_eof() consults that,
@@ -3233,7 +3252,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             !st->rready && !st->rarmed) {
             if (hp_ur_dbg)
                 fprintf(stderr, "[ur] rearm-after-cqe fd=%d\n", (int)fd);
-            if (!hp_uring_arm_recv(fd, HP_UR_RECV_LEN) && hp_ur_dbg)
+            if (!hp_uring_arm_recv(fd, hp_ur_rlen()) && hp_ur_dbg)
                 fprintf(stderr, "[ur] rearm-failed fd=%d\n", (int)fd);
         }
     }
@@ -3281,7 +3300,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             if (hp_ur_dbg)
                 fprintf(stderr, "[ur] retry-arm fd=%u rready=%d rarmed=%d\n",
                         (unsigned)i, st->rready, st->rarmed);
-            if (hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN)) {
+            if (hp_uring_arm_recv((hp_sock)i, hp_ur_rlen())) {
                 slots--;
             } else {
                 /* leave it parked for the next cycle instead of re-parking and
@@ -3340,7 +3359,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
                 hp_ur_retfd((hp_sock)i);
             if (st->rh && !st->rready && !st->rarmed &&
-                !hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN))
+                !hp_uring_arm_recv((hp_sock)i, hp_ur_rlen()))
                 hp_ur_retfd((hp_sock)i);
         }
         hp_ur_rethead = hp_ur_rettail = 0;
